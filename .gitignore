@@ -1,0 +1,51 @@
+# ── Build artifacts ───────────────────────────────────────────────
+# object files: src/*.o, bench/*.o, study/*.o
+*.o
+# dependency files (if -MMD is added later)
+*.d
+*.a
+*.so
+*.gch
+
+# Compiled binaries (Makefile output + per-cycle probes/benches).
+# Sources are .c/.h; these are the extensionless build products.
+bench/benchmark
+bench/bench_engine
+bench/bench_lsm
+study/fast_path
+o_direct_probe
+*_probe
+*.out
+a.out
+/build/
+
+# ── Test / runtime data ───────────────────────────────────────────
+# O_DIRECT backing files, SSTables, WAL, manifests written during a run
+# (these live on the Proxmox VM, but ignore locally too just in case).
+*.dat
+*.db
+*.wal
+*.sst
+*.log
+/data/
+/tmp/
+*.tmp
+
+# ── Profiling / eval output ───────────────────────────────────────
+perf.data
+perf.data.old
+*.svg
+callgrind.out.*
+massif.out.*
+vgcore.*
+
+# ── Editor / OS cruft ─────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.orig
+compile_commands.json
+.cache/

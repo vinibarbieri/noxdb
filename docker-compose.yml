@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  claude:
+    image: node:20-slim
+    volumes:
+      # Mapeia a pasta do seu projeto para dentro do container
+      - .:/workspace
+      # CRUCIAL: Salva as credenciais do seu login Pro para você não perder ao fechar
+      - claude_config:/root/.config
+    working_dir: /workspace
+    stdin_open: true # Mantém o terminal aberto (-i)
+    tty: true        # Habilita o terminal interativo (-t)
+    entrypoint: npx @anthropic-ai/claude-code
+
+volumes:
+  claude_config:
