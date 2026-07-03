@@ -3,7 +3,7 @@
  */
 #define _GNU_SOURCE
 #include "io_direct.h"
-#include "wsbuffer_config.h"
+#include "noxdb_config.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -22,10 +22,10 @@ static void report_einval(const char *op, off_t off, size_t len, const void *buf
             "    offset%%4096=%lld len%%4096=%zu buf%%4096=%lu\n"
             "    (O_DIRECT needs all three aligned to %u bytes)\n\n",
             op, (long long)off, len, buf,
-            (long long)(off % WSB_BLOCK_SIZE),
-            len % WSB_BLOCK_SIZE,
-            (unsigned long)((uintptr_t)buf & (WSB_BLOCK_SIZE - 1)),
-            WSB_BLOCK_SIZE);
+            (long long)(off % NOX_BLOCK_SIZE),
+            len % NOX_BLOCK_SIZE,
+            (unsigned long)((uintptr_t)buf & (NOX_BLOCK_SIZE - 1)),
+            NOX_BLOCK_SIZE);
 }
 
 int io_direct_open(const char *path)
@@ -44,8 +44,8 @@ ssize_t io_direct_pwrite(int fd, const void *buf, size_t len, off_t off)
     /* The user buffer may come from plain malloc() and not be 4K-aligned.
      * O_DIRECT demands an aligned source address, so copy through an aligned
      * bounce buffer when necessary. (docs/02 §1) */
-    if (!WSB_IS_ALIGNED(buf)) {
-        if (posix_memalign(&bounce, WSB_BLOCK_SIZE, len) != 0) {
+    if (!NOX_IS_ALIGNED(buf)) {
+        if (posix_memalign(&bounce, NOX_BLOCK_SIZE, len) != 0) {
             errno = ENOMEM;
             return -1;
         }

@@ -18,7 +18,7 @@ struct page_index {
  * page number itself spreads across buckets, then mix with a Fibonacci constant. */
 static inline uint32_t pi_hash(uint64_t base)
 {
-    uint64_t page_no = base / WSB_DATAZONE_SIZE;
+    uint64_t page_no = base / NOX_DATAZONE_SIZE;
     return (uint32_t)((page_no * 0x9E3779B97F4A7C15ull) >> 46) & PI_MASK;
 }
 

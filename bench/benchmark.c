@@ -1,5 +1,5 @@
 /*
- * benchmark.c - WSBuffer MVP driver.
+ * benchmark.c - NoxDB MVP driver.
  *
  * Issues a mix of (a) large 4K-aligned writes (fast path -> O_DIRECT) and
  * (b) small unaligned writes (scrap path), reports throughput.
@@ -10,8 +10,8 @@
  *   usage: ./benchmark <backing-file-on-nvme>
  */
 #define _GNU_SOURCE
-#include "wsbuffer.h"
-#include "wsbuffer_config.h"
+#include "noxdb.h"
+#include "noxdb_config.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -44,17 +44,17 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    wsb_engine_t *e = wsb_open(argv[1]);
+    nox_engine_t *e = nox_open(argv[1]);
     if (!e) {
-        perror("wsb_open");
+        perror("nox_open");
         return 1;
     }
 
     /* Aligned source buffer for the fast path (avoids the bounce-buffer copy). */
     void *big = NULL;
-    if (posix_memalign(&big, WSB_BLOCK_SIZE, BIG_WRITE_SIZE) != 0) {
+    if (posix_memalign(&big, NOX_BLOCK_SIZE, BIG_WRITE_SIZE) != 0) {
         fprintf(stderr, "posix_memalign failed\n");
-        wsb_close(e);
+        nox_close(e);
         return 1;
     }
     memset(big, 0xAB, BIG_WRITE_SIZE);
@@ -63,10 +63,10 @@ int main(int argc, char **argv)
     double t0 = now_sec();
     uint64_t off = 0;
     for (int i = 0; i < BIG_WRITE_COUNT; i++) {
-        if (wsb_write(e, big, BIG_WRITE_SIZE, off) != 0) {
-            perror("wsb_write (big)");
+        if (nox_write(e, big, BIG_WRITE_SIZE, off) != 0) {
+            perror("nox_write (big)");
             free(big);
-            wsb_close(e);
+            nox_close(e);
             return 1;
         }
         off += BIG_WRITE_SIZE;
@@ -82,10 +82,10 @@ int main(int argc, char **argv)
     for (int i = 0; i < SMALL_WRITE_COUNT; i++) {
         /* Unaligned, pseudo-scattered offsets to exercise merge + paging. */
         uint64_t soff = base + (uint64_t)i * 333u;
-        if (wsb_write(e, small, SMALL_WRITE_SIZE, soff) != 0) {
-            perror("wsb_write (small)");
+        if (nox_write(e, small, SMALL_WRITE_SIZE, soff) != 0) {
+            perror("nox_write (small)");
             free(big);
-            wsb_close(e);
+            nox_close(e);
             return 1;
         }
     }
@@ -96,8 +96,8 @@ int main(int argc, char **argv)
     free(big);
 
     /* Flushes all remaining partial pages (read-before-write) and closes. */
-    if (wsb_close(e) != 0) {
-        fprintf(stderr, "wsb_close reported a flush/close error\n");
+    if (nox_close(e) != 0) {
+        fprintf(stderr, "nox_close reported a flush/close error\n");
         return 1;
     }
 

@@ -1,8 +1,8 @@
-# WSBuffer MVP — Implementation Reference
+# NoxDB MVP — Implementation Reference
 
 ## What Was Implemented
 
-WSBuffer MVP storage engine. C11, write-only. Routes user writes two ways:
+NoxDB MVP storage engine. C11, write-only. Routes user writes two ways:
 
 - **Big aligned writes** → straight to SSD via `O_DIRECT` (kernel bypass)
 - **Small/unaligned writes** → absorbed into RAM 256 KB scrap pages, flushed to SSD when full
@@ -13,8 +13,8 @@ Goal ([docs/03](03_pio_theory.md)): dodge OS page-cache lock contention + the re
 
 | File | Role |
 |---|---|
-| `wsbuffer_config.h` | Magic numbers from docs (4096 align, 1 MB threshold, 128 B header, 256 KB zone, 15 entries) |
-| `wsbuffer.h` / `wsbuffer.c` | Public API + the router |
+| `noxdb_config.h` | Magic numbers from docs (4096 align, 1 MB threshold, 128 B header, 256 KB zone, 15 entries) |
+| `noxdb.h` / `noxdb.c` | Public API + the router |
 | `scrap_page.{h,c}` | The 256 KB page struct, segment merge, flush |
 | `page_index.{h,c}` | Hash table: file offset → live page |
 | `io_direct.{h,c}` | `pwrite`/`pread` `O_DIRECT` layer |
@@ -39,11 +39,11 @@ Field order matters. `ssd_id` (`uint16`) sits right after `counter` so it lands 
 
 `entries[]` track which byte ranges inside the zone hold valid user data — `{offset, size}` pairs. The header is partial-write metadata: unlike a normal page cache where pages are always full, scrap pages hold scattered fragments.
 
-**Data zone (256 KB):** allocated separately via `posix_memalign(4096, 256KB)`. Critical ([docs/01 §2](01_architecture_wsbuffer.md)) — a single `malloc` of header+data would not guarantee the 4 K alignment `O_DIRECT` needs. See `scrap_page.c:21`.
+**Data zone (256 KB):** allocated separately via `posix_memalign(4096, 256KB)`. Critical ([docs/01 §2](01_architecture_noxdb.md)) — a single `malloc` of header+data would not guarantee the 4 K alignment `O_DIRECT` needs. See `scrap_page.c:21`.
 
 ---
 
-### 2. The Router — `wsb_write` (`wsbuffer.c`)
+### 2. The Router — `nox_write` (`noxdb.c`)
 
 ```c
 if (size >= 1MB && size % 4096 == 0 && offset % 4096 == 0)
@@ -92,12 +92,12 @@ Merge probes overflow on a **copy** of the header first, so a rejected merge lea
 ### 6. Lifecycle
 
 ```
-wsb_open  → O_DIRECT fd + hash index
-wsb_write → routes (fast path or scrap path)
-wsb_close → flushes all remaining partial pages, frees everything, closes fd
+nox_open  → O_DIRECT fd + hash index
+nox_write → routes (fast path or scrap path)
+nox_close → flushes all remaining partial pages, frees everything, closes fd
 ```
 
-Full pages are flushed inline during writes; `wsb_close` only handles leftover partials.
+Full pages are flushed inline during writes; `nox_close` only handles leftover partials.
 
 ---
 
@@ -109,13 +109,13 @@ Full pages are flushed inline during writes; `wsb_close` only handles leftover p
 
 **1. Deploy sources to the VM** (edit host/path):
 ```sh
-make deploy REMOTE=you@vm-ip REMOTE_DIR=~/wsbuffer
+make deploy REMOTE=you@vm-ip REMOTE_DIR=~/noxdb
 ```
 
 **2. On the VM, compile and run against an NVMe-backed file:**
 ```sh
 make
-./bench/benchmark /mnt/nvme/wsb_test.dat
+./bench/benchmark /mnt/nvme/nox_test.dat
 ```
 
 **3. Expected output** — two throughput lines and `OK`:
@@ -128,10 +128,10 @@ OK
 **4. What to confirm:**
 
 - No `"O_DIRECT alignment violation"` printed under normal aligned ops (if it appears, an alignment invariant broke)
-- `wsb_close` returns `0` (all flushes succeeded)
+- `nox_close` returns `0` (all flushes succeeded)
 - Data integrity — read the file back and check written bytes survived:
   ```sh
-  xxd /mnt/nvme/wsb_test.dat | head   # 0xAB region = fast-path data
+  xxd /mnt/nvme/nox_test.dat | head   # 0xAB region = fast-path data
   ```
 - Compile-time: build fails if `scrap_header_t` ever drifts off 128 B (the `_Static_assert`)
 

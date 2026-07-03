@@ -1,4 +1,4 @@
-# WSBuffer — Study & Supervision Plan
+# NoxDB — Study & Supervision Plan
 
 **Goal:** Claude Code writes the implementation. You acquire, cycle by cycle, the knowledge to **understand, review, discuss, and defend** every component — so the final system can be presented to a professor or in a talk.
 
@@ -55,12 +55,12 @@ The repo already contains C0–C2's code (untracked — commit it as baseline fi
 
 | Concept (Review card) | File · symbol | Lines | Note |
 |---|---|---|---|
-| All magic numbers (128B, 256KB, 1MB, 4096, 15) | `src/wsbuffer_config.h` | 14–40 | Source of truth mirror of `docs/01`. Start here. |
+| All magic numbers (128B, 256KB, 1MB, 4096, 15) | `src/noxdb_config.h` | 14–40 | Source of truth mirror of `docs/01`. Start here. |
 | `O_DIRECT` open (flags) | `src/io_direct.c` · `io_direct_open` | 31–37 | `O_RDWR\|O_DIRECT\|O_CREAT` |
 | EINVAL "alignment violation" diagnostic | `src/io_direct.c` · `report_einval` | 17–29 | The loud stderr message (CLAUDE.md §2) |
 | EINVAL catch sites | `src/io_direct.c` · pwrite/pread | 64–66, 77–78 | Where errno==EINVAL is trapped |
-| Alignment macros | `src/wsbuffer_config.h` · `WSB_IS_ALIGNED`, `WSB_PAGE_BASE` | 36, 40 | Bit-mask alignment + page-base rounding |
-| **Router / fast-path branch** | `src/wsbuffer.c` · `wsb_write` | 98–134 | Fast-path test at **106–111** (the 3 conditions) |
+| Alignment macros | `src/noxdb_config.h` · `NOX_IS_ALIGNED`, `NOX_PAGE_BASE` | 36, 40 | Bit-mask alignment + page-base rounding |
+| **Router / fast-path branch** | `src/noxdb.c` · `nox_write` | 98–134 | Fast-path test at **106–111** (the 3 conditions) |
 | pwrite + bounce buffer | `src/io_direct.c` · `io_direct_pwrite` | 39–69 | Bounce alloc 47–54; why pwrite not write+lseek 57–58 |
 | pread wrapper | `src/io_direct.c` · `io_direct_pread` | 71–81 | Caller guarantees alignment |
 | **128B header layout (every byte)** | `src/scrap_page.h` · `scrap_header_t` | 31–37 | Field offsets in comments; `_Static_assert` at **39** proves =128B |
@@ -71,16 +71,16 @@ The repo already contains C0–C2's code (untracked — commit it as baseline fi
 | Merge entry point (overflow-safe probe) | `src/scrap_page.c` · `scrap_page_merge` | 117–130 | Probes a header *copy* (122–124) before committing |
 | is_full (counter == 256KB) | `src/scrap_page.c` · `scrap_page_is_full` | 49–52 | |
 | **Synchronous flush = OTflush stand-in** | `src/scrap_page.c` · `scrap_page_flush` | 132–169 | Full path 134–141; partial read-before-write 143–168. **This whole function gets replaced by async Q1/Q2 in C4.** |
-| Page-split loop (write straddles pages) | `src/wsbuffer.c` · `wsb_write` | 115–132 | |
-| Overflow → flush → retry | `src/wsbuffer.c` · `scrap_write_chunk` | 54–96 | MVP eviction stand-in (67–83) |
+| Page-split loop (write straddles pages) | `src/noxdb.c` · `nox_write` | 115–132 | |
+| Overflow → flush → retry | `src/noxdb.c` · `scrap_write_chunk` | 54–96 | MVP eviction stand-in (67–83) |
 | Hash index (single global, **NO locks yet**) | `src/page_index.c` | 10–87 | `pi_hash` 19–23; get_or_create 45–64. **C3 adds sharded locks here.** |
 | Bench seed | `bench/benchmark.c` | all | Seeds `bench_engine.c` in C10 |
 
 **Not built yet (don't go looking — these are NEW in their cycle):**
-- `tag = FLUSHING` state — only `WSB_TAG_OPEN`/`WSB_TAG_FULL` exist today (`wsbuffer_config.h:32–33`). C5 adds FLUSHING.
+- `tag = FLUSHING` state — only `NOX_TAG_OPEN`/`NOX_TAG_FULL` exist today (`noxdb_config.h:32–33`). C5 adds FLUSHING.
 - `otflush.{h,c}`, `queue.{h,c}` — C4.
 - Per-shard / per-bucket locks in `page_index` — C3.
-- `wsb_read()`, `wsb_fsync()` — not in `wsbuffer.c` yet. C6.
+- `nox_read()`, `nox_fsync()` — not in `noxdb.c` yet. C6.
 - All `lsm/` files — C7–C9. `baselines.{h,c}`, `bench_lsm.c` — C10.
 
 > **How the existing code shifts the early cycles:** for C1 and C2 the BUILD card is essentially *already done*. Treat those cycles as **REVIEW-only** — study the theory, then read the mapped lines and answer the defense questions. C0's only real BUILD is the Makefile/deploy + the throwaway probe. The first cycle where Claude writes substantial new code is **C3**.
@@ -115,7 +115,7 @@ The repo already contains C0–C2's code (untracked — commit it as baseline fi
 
 ## Cycle 1 — The Fast Path & engine skeleton
 
-**What Claude builds / extends:** `io_direct.{h,c}` (`pread`/`pwrite` wrappers, `EINVAL` → loud "O_DIRECT alignment violation"), `wsbuffer.c` router fast-path branch (`size ≥ 1MB && size%4096==0 && offset%4096==0` → straight to `pwrite`). *(Much already exists — your job is to understand it, not rewrite.)*
+**What Claude builds / extends:** `io_direct.{h,c}` (`pread`/`pwrite` wrappers, `EINVAL` → loud "O_DIRECT alignment violation"), `noxdb.c` router fast-path branch (`size ≥ 1MB && size%4096==0 && offset%4096==0` → straight to `pwrite`). *(Much already exists — your job is to understand it, not rewrite.)*
 
 **Study before:**
 - TLPI ch 5 again: **positional I/O** — `pread`/`pwrite` vs `read`/`write`+`lseek`. Why the global file offset is shared across threads.
@@ -124,7 +124,7 @@ The repo already contains C0–C2's code (untracked — commit it as baseline fi
 **Review checklist:**
 - [ ] Why `pwrite` not `write`+`lseek` — the shared-offset race (even before threads exist, it's the right habit).
 - [ ] The exact fast-path condition. Why **all three** (size threshold, size alignment, offset alignment) are required — what happens if any one is dropped.
-- [ ] Walk `wsb_write()` in `src/wsbuffer.c` line by line and narrate the routing decision.
+- [ ] Walk `nox_write()` in `src/noxdb.c` line by line and narrate the routing decision.
 - [ ] Why fast path bypasses the scrap buffer entirely (it's already aligned + big → no read-before-write, no merge needed).
 
 **Defense questions:**
@@ -152,7 +152,7 @@ The repo already contains C0–C2's code (untracked — commit it as baseline fi
 - [ ] Why the data zone needs its own `posix_memalign` — what breaks if it's inline with the header.
 - [ ] What the 15 `entries` track (offset+size of each valid segment) and why only 15 (header size budget). What happens on the 16th disjoint segment (overflow → flush).
 - [ ] What `counter` means (valid bytes) and how "full" = counter == 256 KB.
-- [ ] Trace a small unaligned write through `wsb_write` → page-split loop → `scrap_page_merge`.
+- [ ] Trace a small unaligned write through `nox_write` → page-split loop → `scrap_page_merge`.
 
 **Defense questions:**
 1. Why a "scrap" page instead of a fixed full page like the kernel uses?
@@ -210,16 +210,16 @@ These three *are* OTflush in miniature. You must write them by hand.
 - Concept: **why opportunistic, not pressure-triggered** — flooding the SSD with Stage-1 reads under pressure causes the exact latency spike you're trying to avoid. This distinction *is* the paper's novelty.
 
 **Review checklist — the cycle that makes or breaks the thesis:**
-- [ ] Explain the full lifecycle: `wsb_write` → merge → (full→Q2 | partial→Q1) → Stage-1 hole-fill (idle-gated) → page full → Q2 → Stage-2 pwrite → reclaim.
+- [ ] Explain the full lifecycle: `nox_write` → merge → (full→Q2 | partial→Q1) → Stage-1 hole-fill (idle-gated) → page full → Q2 → Stage-2 pwrite → reclaim.
 - [ ] Why a partial page enters Q1 **immediately**, not at a memory watermark. What the alternative would cause.
 - [ ] What `Bcount` measures and how Stage-1 uses it to drain Q1 only in the SSD's idle gaps.
 - [ ] Why a full page skips Q1 entirely (no read needed) — *this is the win over buffered I/O*.
-- [ ] Why foreground `wsb_write` **never blocks on I/O**.
+- [ ] Why foreground `nox_write` **never blocks on I/O**.
 - [ ] When `pwritev` batches instead of `pwrite` (contiguous regions).
 - [ ] Read the queue impl: how condvar makes a thread sleep without burning CPU and how it's woken.
 
 **Defense questions:**
-1. Walk me through what happens to a 4 KB write from `wsb_write` return to bytes-on-SSD.
+1. Walk me through what happens to a 4 KB write from `nox_write` return to bytes-on-SSD.
 2. Why is the enqueue opportunistic and not triggered by memory pressure? What fails otherwise?
 3. What is the read-before-write penalty and exactly how does Stage-1 hide it?
 4. How does a full page avoid the penalty entirely?
@@ -257,7 +257,7 @@ These three *are* OTflush in miniature. You must write them by hand.
 
 ## Cycle 6 — Read path + fsync + durability contract
 
-**What Claude builds:** `wsb_read()` (spec §3.5) — aligned `pread` from disk (bounce buffer if user buf unaligned) + overlay every resident scrap page's valid segments (read-your-writes). `wsb_fsync()` — flush all dirty pages → wait completion → `fsync(fd)`.
+**What Claude builds:** `nox_read()` (spec §3.5) — aligned `pread` from disk (bounce buffer if user buf unaligned) + overlay every resident scrap page's valid segments (read-your-writes). `nox_fsync()` — flush all dirty pages → wait completion → `fsync(fd)`.
 
 **Study before:**
 - OSTEP **Crash Consistency** chapter (fsync, what's durable when).
@@ -266,8 +266,8 @@ These three *are* OTflush in miniature. You must write them by hand.
 
 **Review checklist:**
 - [ ] Why a read must overlay RAM pages on top of the disk read (a just-written value may not be on disk yet).
-- [ ] Why `wsb_read` is symmetric to the partial-page flush.
-- [ ] What `wsb_fsync` guarantees after it returns. Why the engine keeps **no cross-restart state** and why that's correct (recovery is the LSM's job).
+- [ ] Why `nox_read` is symmetric to the partial-page flush.
+- [ ] What `nox_fsync` guarantees after it returns. Why the engine keeps **no cross-restart state** and why that's correct (recovery is the LSM's job).
 - [ ] Bounce buffer: when and why (user buffer not 4 KB-aligned).
 
 **Defense questions:**
@@ -283,7 +283,7 @@ These three *are* OTflush in miniature. You must write them by hand.
 
 ## Cycle 7 — MemTable + WAL
 
-**What Claude builds:** `memtable` (skiplist, size-bounded — Claude can generate the skiplist, but you must understand it), `wal` (append-only; every put appended **before** memtable insert → `wsb_write` small → scrap path).
+**What Claude builds:** `memtable` (skiplist, size-bounded — Claude can generate the skiplist, but you must understand it), `wal` (append-only; every put appended **before** memtable insert → `nox_write` small → scrap path).
 
 **Study before:**
 - RocksDB/LevelDB design docs: what a memtable and WAL are.
@@ -307,7 +307,7 @@ These three *are* OTflush in miniature. You must write them by hand.
 
 ## Cycle 8 — SSTable + memtable flush
 
-**What Claude builds:** `sstable` (immutable: data blocks + sparse index + footer), memtable-full → flush to a new SSTable file via `wsb_write` ≥1 MB aligned → **fast path**.
+**What Claude builds:** `sstable` (immutable: data blocks + sparse index + footer), memtable-full → flush to a new SSTable file via `nox_write` ≥1 MB aligned → **fast path**.
 
 **Study before:**
 - LevelDB SSTable format (data blocks, index block, footer).
@@ -317,7 +317,7 @@ These three *are* OTflush in miniature. You must write them by hand.
 - [ ] SSTable layout: data blocks → sparse index → footer. Why sparse, not dense.
 - [ ] Why the flush is a big aligned sequential write → fast path. Tie to the spine table (spec §2).
 - [ ] Why SSTables are immutable and what that buys (no in-place update, lock-free reads, easy compaction).
-- [ ] One `wsb_open` handle per SSTable file (decision 1(a)).
+- [ ] One `nox_open` handle per SSTable file (decision 1(a)).
 
 **Defense questions:**
 1. Why is a memtable flush exactly the workload the fast path is designed for?
@@ -330,7 +330,7 @@ These three *are* OTflush in miniature. You must write them by hand.
 
 ## Cycle 9 — Compaction + manifest + get path + recovery
 
-**What Claude builds:** size-tiered `compaction` (merge N SSTables → one larger, drop tombstones/overwrites; reads via `wsb_read`, writes big via fast path), `manifest` (tracks live SSTables/tiers), full `get` (memtable → SSTables newest→oldest, first hit wins, tombstone = deleted), recovery (replay WAL → rebuild memtable; load SSTables from manifest).
+**What Claude builds:** size-tiered `compaction` (merge N SSTables → one larger, drop tombstones/overwrites; reads via `nox_read`, writes big via fast path), `manifest` (tracks live SSTables/tiers), full `get` (memtable → SSTables newest→oldest, first hit wins, tombstone = deleted), recovery (replay WAL → rebuild memtable; load SSTables from manifest).
 
 **Study before:**
 - Size-tiered compaction (vs leveled — and why you chose tiered, §4.3 YAGNI).
@@ -340,7 +340,7 @@ These three *are* OTflush in miniature. You must write them by hand.
 - [ ] Why `get` searches memtable first, then SSTables newest→oldest, first hit wins.
 - [ ] What a tombstone is and why deletes can't just remove data (immutable SSTables below).
 - [ ] What compaction drops and why (superseded versions + tombstones) — reclaims space, bounds read amp.
-- [ ] Why compaction is *both* big read (`wsb_read`) and big write (fast path) — the spine on a real workload.
+- [ ] Why compaction is *both* big read (`nox_read`) and big write (fast path) — the spine on a real workload.
 - [ ] Recovery: WAL replay rebuilds the memtable; manifest names the live SSTables. Why the engine contributes nothing here.
 
 **Defense questions:**
@@ -366,13 +366,13 @@ These three *are* OTflush in miniature. You must write them by hand.
 
 **Review checklist:**
 - [ ] For each experiment: what it proves, which baseline it compares against, the expected shape of the graph.
-- [ ] **E2 is the money graph** — scale writer threads 1→N: page-cache plateaus (XArray), WSBuffer scales near-linear. Be able to explain *why* the lines diverge.
+- [ ] **E2 is the money graph** — scale writer threads 1→N: page-cache plateaus (XArray), NoxDB scales near-linear. Be able to explain *why* the lines diverge.
 - [ ] Why you need **two** baselines (page-cache AND raw O_DIRECT), not one — what each isolates.
 - [ ] Why report p99/p99.9, not just mean throughput.
 - [ ] CPU utilization is the C1 proof (less CPU for same/more bandwidth). How `perf` shows it.
 
 **Defense questions:**
-1. Walk me through E2 and why page-cache collapses while WSBuffer scales.
+1. Walk me through E2 and why page-cache collapses while NoxDB scales.
 2. Why is raw `O_DIRECT` a baseline if your fast path *is* O_DIRECT? (E3: fast path ≈ raw → proves no overhead; raw can't do E1's unaligned writes → proves the scrap buffer's value.)
 3. Your throughput is high but p99.9 latency spikes — what would you investigate? (Stage-1 not idle-gated? watermark thrash?)
 4. How do you prove the CPU saving, not just the bandwidth?
@@ -385,7 +385,7 @@ These three *are* OTflush in miniature. You must write them by hand.
 
 You must be able to say this, unscripted:
 
-> *"The OS page cache fails high-bandwidth NVMe on three axes (PIO model): over-buffering burns CPU (C1), the XArray lock serializes concurrent writes and starves the SSD's internal channels (C2), and partial writes pay a synchronous read-before-write penalty (C3). WSBuffer routes large aligned writes straight to the SSD via O_DIRECT (fixes C1/C2) and absorbs small/unaligned writes into a user-space scrap buffer, hiding the read-before-write penalty in the SSD's idle cycles via opportunistic two-stage flushing (fixes C3). Sharded locks replace the global XArray lock. A thin LSM proves the engine's router is exactly the routing a real database needs — for free, because the workload's natural shape routes itself."*
+> *"The OS page cache fails high-bandwidth NVMe on three axes (PIO model): over-buffering burns CPU (C1), the XArray lock serializes concurrent writes and starves the SSD's internal channels (C2), and partial writes pay a synchronous read-before-write penalty (C3). NoxDB routes large aligned writes straight to the SSD via O_DIRECT (fixes C1/C2) and absorbs small/unaligned writes into a user-space scrap buffer, hiding the read-before-write penalty in the SSD's idle cycles via opportunistic two-stage flushing (fixes C3). Sharded locks replace the global XArray lock. A thin LSM proves the engine's router is exactly the routing a real database needs — for free, because the workload's natural shape routes itself."*
 
 If any clause in that paragraph is fuzzy, the cycle that owns it isn't done.
 

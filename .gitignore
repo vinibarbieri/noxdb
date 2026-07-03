@@ -49,3 +49,4 @@ vgcore.*
 *.orig
 compile_commands.json
 .cache/
+build-in-public

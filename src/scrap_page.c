@@ -18,18 +18,18 @@ scrap_page_t *scrap_page_alloc(uint64_t base, uint16_t ssd_id)
      * header struct with posix_memalign so its address is 4K-aligned for
      * O_DIRECT. A single malloc of header+data would NOT guarantee alignment. */
     void *zone = NULL;
-    if (posix_memalign(&zone, WSB_BLOCK_SIZE, WSB_DATAZONE_SIZE) != 0) {
+    if (posix_memalign(&zone, NOX_BLOCK_SIZE, NOX_DATAZONE_SIZE) != 0) {
         free(p);
         return NULL;
     }
 
     /* Zero the data zone: bytes in "holes" (regions never written by the user)
      * default to 0; they get overwritten by read-before-write at flush time. */
-    memset(zone, 0, WSB_DATAZONE_SIZE);
+    memset(zone, 0, NOX_DATAZONE_SIZE);
 
     memset(&p->hdr, 0, sizeof(p->hdr));
     p->hdr.ssd_id = ssd_id;
-    p->hdr.tag    = WSB_TAG_OPEN;
+    p->hdr.tag    = NOX_TAG_OPEN;
     p->data       = zone;
     p->base       = base;
     p->next       = NULL;
@@ -48,7 +48,7 @@ void scrap_page_free(scrap_page_t *p)
 
 int scrap_page_is_full(const scrap_page_t *p)
 {
-    return p->hdr.counter == WSB_DATAZONE_SIZE;
+    return p->hdr.counter == NOX_DATAZONE_SIZE;
 }
 
 /*
@@ -58,7 +58,7 @@ int scrap_page_is_full(const scrap_page_t *p)
  * by the caller (scrap_page_merge) before this runs.
  *
  * Returns SCRAP_OVERFLOW (leaving the header untouched) if the result would
- * need more than WSB_MAX_ENTRIES entries.
+ * need more than NOX_MAX_ENTRIES entries.
  */
 static scrap_status_t coalesce_insert(scrap_header_t *h, uint32_t off, uint32_t len)
 {
@@ -66,7 +66,7 @@ static scrap_status_t coalesce_insert(scrap_header_t *h, uint32_t off, uint32_t 
     uint32_t new_end = off + len;           /* segments never exceed 256KB */
 
     /* Build the new entry list in a scratch array (room for one extra). */
-    scrap_entry_t out[WSB_MAX_ENTRIES + 1];
+    scrap_entry_t out[NOX_MAX_ENTRIES + 1];
     uint8_t n = 0;
     uint8_t i = 0;
 
@@ -87,7 +87,7 @@ static scrap_status_t coalesce_insert(scrap_header_t *h, uint32_t off, uint32_t 
     }
 
     /* (3) Emit the merged range. */
-    if (n >= WSB_MAX_ENTRIES + 1)
+    if (n >= NOX_MAX_ENTRIES + 1)
         return SCRAP_OVERFLOW;
     out[n].offset = new_off;
     out[n].size   = new_end - new_off;
@@ -95,12 +95,12 @@ static scrap_status_t coalesce_insert(scrap_header_t *h, uint32_t off, uint32_t 
 
     /* (4) Copy through the remaining (strictly-after) segments. */
     while (i < h->number) {
-        if (n >= WSB_MAX_ENTRIES + 1)
+        if (n >= NOX_MAX_ENTRIES + 1)
             return SCRAP_OVERFLOW;
         out[n++] = h->entries[i++];
     }
 
-    if (n > WSB_MAX_ENTRIES)
+    if (n > NOX_MAX_ENTRIES)
         return SCRAP_OVERFLOW;
 
     /* Commit: copy scratch back and recompute counter (sum of disjoint sizes). */
@@ -134,10 +134,10 @@ int scrap_page_flush(scrap_page_t *p, int fd)
     if (scrap_page_is_full(p)) {
         /* Full page: every byte is valid user data — write it straight out.
          * base is 256KB-aligned (=> 4K-aligned), len is 256KB, data is aligned. */
-        ssize_t w = io_direct_pwrite(fd, p->data, WSB_DATAZONE_SIZE,
+        ssize_t w = io_direct_pwrite(fd, p->data, NOX_DATAZONE_SIZE,
                                      (off_t)p->base);
-        p->hdr.tag = WSB_TAG_FULL;
-        return (w == (ssize_t)WSB_DATAZONE_SIZE) ? 0 : -1;
+        p->hdr.tag = NOX_TAG_FULL;
+        return (w == (ssize_t)NOX_DATAZONE_SIZE) ? 0 : -1;
     }
 
     /* Partial page: synchronous read-before-write. Read the current 256KB
@@ -145,11 +145,11 @@ int scrap_page_flush(scrap_page_t *p, int fd)
      * contents), overlay our valid segments, then write the whole region back.
      * This fuses OTflush Stage-1 (read holes) and Stage-2 (write) (docs/01 §4). */
     void *scratch = NULL;
-    if (posix_memalign(&scratch, WSB_BLOCK_SIZE, WSB_DATAZONE_SIZE) != 0)
+    if (posix_memalign(&scratch, NOX_BLOCK_SIZE, NOX_DATAZONE_SIZE) != 0)
         return -1;
-    memset(scratch, 0, WSB_DATAZONE_SIZE); /* default for region past EOF */
+    memset(scratch, 0, NOX_DATAZONE_SIZE); /* default for region past EOF */
 
-    ssize_t r = io_direct_pread(fd, scratch, WSB_DATAZONE_SIZE, (off_t)p->base);
+    ssize_t r = io_direct_pread(fd, scratch, NOX_DATAZONE_SIZE, (off_t)p->base);
     if (r < 0) {
         free(scratch);
         return -1; /* short read (r >= 0) is fine; only a hard error aborts */
@@ -162,8 +162,8 @@ int scrap_page_flush(scrap_page_t *p, int fd)
         memcpy((uint8_t *)scratch + off, p->data + off, sz);
     }
 
-    ssize_t w = io_direct_pwrite(fd, scratch, WSB_DATAZONE_SIZE, (off_t)p->base);
+    ssize_t w = io_direct_pwrite(fd, scratch, NOX_DATAZONE_SIZE, (off_t)p->base);
     free(scratch);
-    p->hdr.tag = WSB_TAG_FULL;
-    return (w == (ssize_t)WSB_DATAZONE_SIZE) ? 0 : -1;
+    p->hdr.tag = NOX_TAG_FULL;
+    return (w == (ssize_t)NOX_DATAZONE_SIZE) ? 0 : -1;
 }

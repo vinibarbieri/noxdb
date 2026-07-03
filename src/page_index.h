@@ -1,6 +1,6 @@
 /*
  * page_index.h - Hash table mapping a 256KB-aligned file offset to its live
- * scrap page. Keyed by WSB_PAGE_BASE(offset). Separate chaining via
+ * scrap page. Keyed by NOX_PAGE_BASE(offset). Separate chaining via
  * scrap_page_t.next. (Index structure not specified by docs; chosen for the MVP
  * because it is sparse and tolerates large/random offsets.)
  */

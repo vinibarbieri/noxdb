@@ -11,7 +11,7 @@
 #include <pthread.h>
 #include <stdint.h>
 
-#include "wsbuffer_config.h"
+#include "noxdb_config.h"
 
 /*
  * One index entry: a valid data-segment inside the data zone.
@@ -32,11 +32,11 @@ typedef struct {
     uint32_t      counter;                 /* off 0: total valid bytes in page */
     uint16_t      ssd_id;                  /* off 4: underlying SSD id */
     uint8_t       number;                  /* off 6: count of valid data-segments */
-    uint8_t       tag;                     /* off 7: flush state (WSB_TAG_*) */
-    scrap_entry_t entries[WSB_MAX_ENTRIES];/* off 8: 15*8 = 120B */
+    uint8_t       tag;                     /* off 7: flush state (NOX_TAG_*) */
+    scrap_entry_t entries[NOX_MAX_ENTRIES];/* off 8: 15*8 = 120B */
 } scrap_header_t;                          /* total = 128B */
 
-_Static_assert(sizeof(scrap_header_t) == WSB_HEADER_SIZE,
+_Static_assert(sizeof(scrap_header_t) == NOX_HEADER_SIZE,
                "scrap_header_t must be exactly 128 bytes (docs/01 §1)");
 
 /*
@@ -66,7 +66,7 @@ void scrap_page_free(scrap_page_t *p);
  * Merge `len` bytes from `buf` into the page at intra-page offset `intra_off`.
  * Copies the bytes into the data zone and updates the coalesced index entries,
  * counter and number. Returns SCRAP_OVERFLOW (without modifying entries) if the
- * coalesced segment count would exceed WSB_MAX_ENTRIES.
+ * coalesced segment count would exceed NOX_MAX_ENTRIES.
  */
 scrap_status_t scrap_page_merge(scrap_page_t *p, const void *buf,
                                 uint32_t intra_off, uint32_t len);

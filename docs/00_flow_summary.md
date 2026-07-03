@@ -1,4 +1,4 @@
-# WSBuffer — Project Flow (study notes)
+# NoxDB — Project Flow (study notes)
 
 ## Context: the problem (PIO Model)
 
@@ -9,7 +9,7 @@ NVMe SSDs have 2 characteristics that drive the whole design (doc 03):
 
 Specific pain of the Linux page cache: a **partial/unaligned write** that misses the cache forces a **synchronous read-before-write** (reads the block from SSD before updating), blocking the user. On top of that, the page cache uses a global lock (XArray) that chokes SSD concurrency.
 
-WSBuffer goal: **never make the user wait on SSD I/O**, and **saturate SSD bandwidth** by exploiting its internal parallelism.
+NoxDB goal: **never make the user wait on SSD I/O**, and **saturate SSD bandwidth** by exploiting its internal parallelism.
 
 ## Core concepts
 
@@ -115,6 +115,6 @@ Extra gains: `pwritev` cuts the number of syscalls; O_DIRECT bypasses the page c
 | Layer | Responsibility |
 |---|---|
 | Application (above) | Chooses **which offset** each piece of data occupies. Ensures distinct data does not collide. |
-| WSBuffer engine | Writes faithfully to the requested offset. It is "dumb and obedient": it does not choose addresses, does not guess content, only optimizes **how** to write. |
+| NoxDB engine | Writes faithfully to the requested offset. It is "dumb and obedient": it does not choose addresses, does not guess content, only optimizes **how** to write. |
 
 The offset **is** the identity of the data. Writing B to an offset where A used to be is an intentional overwrite, ordered by the application. Accidental collision of distinct data = allocation bug in the layer above, out of the engine's scope.

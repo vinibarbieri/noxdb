@@ -1,13 +1,13 @@
 /*
- * wsbuffer.c - Engine lifecycle and the write_data router (docs/01 §3).
+ * noxdb.c - Engine lifecycle and the write_data router (docs/01 §3).
  *
  * MVP: the scrap path is synchronous (a full page is flushed inline, a partial
  * page is flushed at shutdown via read-before-write). Background OTflush threads
  * and real lock contention handling are deferred to a later phase.
  */
 #define _GNU_SOURCE
-#include "wsbuffer.h"
-#include "wsbuffer_config.h"
+#include "noxdb.h"
+#include "noxdb_config.h"
 #include "io_direct.h"
 #include "page_index.h"
 #include "scrap_page.h"
@@ -16,15 +16,15 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-struct wsb_engine {
+struct nox_engine {
     int           fd;
     page_index_t *idx;
     uint16_t      ssd_id;   /* single SSD in the MVP */
 };
 
-wsb_engine_t *wsb_open(const char *path)
+nox_engine_t *nox_open(const char *path)
 {
-    wsb_engine_t *e = malloc(sizeof(*e));
+    nox_engine_t *e = malloc(sizeof(*e));
     if (!e)
         return NULL;
 
@@ -51,7 +51,7 @@ wsb_engine_t *wsb_open(const char *path)
  * starting a fresh one (an MVP simplification of OTflush eviction).
  * Returns 0 on success, -1 on I/O error.
  */
-static int scrap_write_chunk(wsb_engine_t *e, uint64_t base, uint32_t intra,
+static int scrap_write_chunk(nox_engine_t *e, uint64_t base, uint32_t intra,
                              const void *buf, uint32_t len)
 {
     int created;
@@ -95,7 +95,7 @@ static int scrap_write_chunk(wsb_engine_t *e, uint64_t base, uint32_t intra,
     return 0;
 }
 
-int wsb_write(wsb_engine_t *e, const void *buf, size_t size, uint64_t offset)
+int nox_write(nox_engine_t *e, const void *buf, size_t size, uint64_t offset)
 {
     if (size == 0)
         return 0;
@@ -103,9 +103,9 @@ int wsb_write(wsb_engine_t *e, const void *buf, size_t size, uint64_t offset)
     /* Fast path (docs/01 §3): big AND 4K-aligned in both size and offset -> skip
      * the scrap buffer entirely and stream to the SSD via O_DIRECT. This is what
      * removes XArray lock contention and exploits SSD parallelism (docs/03 §3). */
-    if (size >= WSB_DIRECT_THRESHOLD &&
-        (size % WSB_BLOCK_SIZE) == 0 &&
-        (offset % WSB_BLOCK_SIZE) == 0) {
+    if (size >= NOX_DIRECT_THRESHOLD &&
+        (size % NOX_BLOCK_SIZE) == 0 &&
+        (offset % NOX_BLOCK_SIZE) == 0) {
         ssize_t w = io_direct_pwrite(e->fd, buf, size, (off_t)offset);
         return (w == (ssize_t)size) ? 0 : -1;
     }
@@ -117,9 +117,9 @@ int wsb_write(wsb_engine_t *e, const void *buf, size_t size, uint64_t offset)
     size_t remaining = size;
 
     while (remaining > 0) {
-        uint64_t base  = WSB_PAGE_BASE(cur);
+        uint64_t base  = NOX_PAGE_BASE(cur);
         uint32_t intra = (uint32_t)(cur - base);
-        uint32_t chunk = WSB_DATAZONE_SIZE - intra;     /* room left in this page */
+        uint32_t chunk = NOX_DATAZONE_SIZE - intra;     /* room left in this page */
         if (chunk > remaining)
             chunk = (uint32_t)remaining;
 
@@ -142,7 +142,7 @@ static void flush_one(scrap_page_t *p, void *ctx)
         c->err = -1;
 }
 
-int wsb_close(wsb_engine_t *e)
+int nox_close(nox_engine_t *e)
 {
     if (!e)
         return 0;

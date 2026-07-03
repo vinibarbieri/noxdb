@@ -13,6 +13,12 @@ Development is strictly guided by the following core reference documents:
 | **OSTEP** — *Part III: Persistence* | Foundation for log-structured FS principles and crash consistency (WAL, `fsync`) |
 | **TLPI** — *Chapters 4, 5, 13* | Strict rulebook for POSIX: `O_DIRECT` alignment, `pread()`/`pwrite()`, scatter-gather I/O |
 
+### Development & measurement environment (decided)
+
+Benchmarks run on **bare-metal Ubuntu Server 24.04 LTS** — no hypervisor, no VM, no container. The earlier Proxmox VM / LXC plan is abandoned: a hypervisor adds scheduling jitter and a shared kernel/page cache that corrupt tail-latency (p99/p99.9) and CPU numbers, and an LXC container cannot `mkfs`/`mount` its own device. Bare metal gives true `iomap` direct I/O and clean `perf`/`iostat` measurements.
+
+The benchmark target is a **dedicated, clean NVMe SSD** (WD SN530, TLC, fixed OEM BOM → reproducible) in the board's M.2 slot, formatted XFS and mounted at `/mnt/nvme`, used **only** for benchmarks. The OS lives on a **separate** disk (Kingston NV2 in a USB enclosure) so OS I/O never contends with the device under test. Code is still written locally and pushed via `make deploy` (rsync) — see CLAUDE.md §3.
+
 ---
 
 ## 2. The Problem Statement: The OS Page Cache Bottleneck
@@ -43,7 +49,7 @@ Large write requests (≥ 1 MB) that are perfectly aligned to the logical block 
 
 Small or unaligned writes are instantly routed to a custom **user-space RAM structure**, eliminating the synchronous read-before-write OS penalty.
 
-> **WSBuffer Layout:** Each `scrap_page_t` has a **128-byte header** (tracking valid bytes, segments, and tags) and a **256 KB data-zone**. The data-zone is allocated separately to preserve 4096-byte `O_DIRECT` alignment.
+> **NoxDB Layout:** Each `scrap_page_t` has a **128-byte header** (tracking valid bytes, segments, and tags) and a **256 KB data-zone**. The data-zone is allocated separately to preserve 4096-byte `O_DIRECT` alignment.
 
 ### 3.3. Opportunistic Two-Stage Flushing (OTflush) & Concurrency
 

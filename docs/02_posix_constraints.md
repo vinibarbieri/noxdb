@@ -1,6 +1,6 @@
 # 02. POSIX & O_DIRECT Constraints
 
-This document defines the strict POSIX system call rules and memory constraints required for the WSBuffer storage engine implementation.
+This document defines the strict POSIX system call rules and memory constraints required for the NoxDB storage engine implementation.
 
 ## 1. Direct I/O (O_DIRECT) Restrictions
 To successfully bypass the kernel buffer cache using the `O_DIRECT` flag, the implementation MUST adhere to three strict alignment rules:
@@ -10,7 +10,7 @@ To successfully bypass the kernel buffer cache using the `O_DIRECT` flag, the im
 *   **Error Handling:** Failure to observe any of these alignment restrictions will cause the underlying I/O system calls to fail and return the `EINVAL` error. The engine must explicitly catch `errno == EINVAL` and print a diagnostic message indicating an `O_DIRECT` alignment violation.
 
 ## 2. Concurrent File I/O (Thread Safety)
-Because WSBuffer uses background OTflush threads (pthreads) to handle I/O concurrently, we must avoid race conditions on the global file offset.
+Because NoxDB uses background OTflush threads (pthreads) to handle I/O concurrently, we must avoid race conditions on the global file offset.
 *   Do NOT use standard `read()` or `write()` combined with `lseek()`, as multiple threads in a process share the same file descriptor table and thus the same global file offset.
 *   Instead, use `pread()` and `pwrite()`. These functions perform I/O at an explicitly specified offset and leave the global file offset unchanged, making them safe for multithreaded concurrent I/O.
 

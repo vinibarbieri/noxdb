@@ -1,4 +1,4 @@
-# WSBuffer — Kanban
+# NoxDB — Kanban
 
 Companion to `plan.md`. Each **cycle** = 4 post-its that travel the columns left→right.
 To move a card: change its status emoji. Update the Board table + the card block together.
@@ -48,18 +48,20 @@ Legend: 📥 Backlog · 📚 Estudando · 🤖 Codando · 🔍 Revisando · ✅ 
 
 ### 🟦 C0 · Env & the alignment battle
 
+> **Bench environment (decided):** bare-metal **Ubuntu Server 24.04 LTS** — no Proxmox/VM/LXC (hypervisor jitter + shared cache poison p99/CPU; a container can't `mkfs`/`mount`). Device under test = a **dedicated clean NVMe** (WD SN530) formatted XFS at `/mnt/nvme`, separate from the OS disk (Kingston NV2 over USB). Run all probes/benches against `/mnt/nvme/...`, never the OS disk.
+
 **C0-STUDY** 📥
 TLPI ch 4 (file I/O, fd model) + ch 5 (`O_DIRECT`, flags). `docs/02` + `docs/03`. Concept: page cache vs what O_DIRECT skips.
 
 **C0-BUILD** 📥
-Makefile + `make deploy` (rsync→Proxmox). `o_direct_probe.c`: 10 MB three ways — malloc+write, malloc+O_DIRECT (must EINVAL), posix_memalign+O_DIRECT (ok).
+Makefile + `make deploy` (rsync→bare-metal Ubuntu bench box). `o_direct_probe.c`: 10 MB three ways — malloc+write, malloc+O_DIRECT (must EINVAL), posix_memalign+O_DIRECT (ok).
 
 **C0-REVIEW** 📥
 Explain: why malloc+O_DIRECT → EINVAL (3 align rules); what posix_memalign gives; what "bypass page cache" means physically; why this project exists (C1/C2/C3).
-📍 Review here: `io_direct.c` `io_direct_open` 31–37 · `report_einval` 17–29 · EINVAL catch 64–66, 77–78. `wsbuffer_config.h` `WSB_IS_ALIGNED` 36, `WSB_BLOCK_SIZE` 14.
+📍 Review here: `io_direct.c` `io_direct_open` 31–37 · `report_einval` 17–29 · EINVAL catch 64–66, 77–78. `noxdb_config.h` `NOX_IS_ALIGNED` 36, `NOX_BLOCK_SIZE` 14.
 
 **C0-GATE** 📥
-Probe runs on VM. You can demo the deliberate EINVAL + the fix.
+Probe runs on the bench box against `/mnt/nvme`. You can demo the deliberate EINVAL + the fix.
 
 ---
 
@@ -72,11 +74,11 @@ TLPI ch 5: `pread`/`pwrite` vs `read`+`lseek` (shared offset). NVMe read/write a
 `io_direct.{h,c}` (EINVAL → loud "O_DIRECT alignment violation"). Router fast-path branch: `size≥1MB && size%4096==0 && offset%4096==0` → `pwrite`. *(Mostly exists — understand it.)*
 
 **C1-REVIEW** 📥
-Explain: why pwrite not write+lseek; why all 3 fast-path conditions; narrate `wsb_write()` routing line by line; why fast path skips scrap buffer.
-📍 Review here: `wsbuffer.c` `wsb_write` 98–134 (fast-path test **106–111**). `io_direct.c` `io_direct_pwrite` 39–69 (bounce 47–54; pwrite-not-lseek 57–58). `wsbuffer_config.h` `WSB_DIRECT_THRESHOLD` 18.
+Explain: why pwrite not write+lseek; why all 3 fast-path conditions; narrate `nox_write()` routing line by line; why fast path skips scrap buffer.
+📍 Review here: `noxdb.c` `nox_write` 98–134 (fast-path test **106–111**). `io_direct.c` `io_direct_pwrite` 39–69 (bounce 47–54; pwrite-not-lseek 57–58). `noxdb_config.h` `NOX_DIRECT_THRESHOLD` 18.
 
 **C1-GATE** 📥
-Fast path benchmarked on VM ≈ raw O_DIRECT bandwidth.
+Fast path benchmarked on the bench box ≈ raw O_DIRECT bandwidth.
 
 ---
 
@@ -92,7 +94,7 @@ Fast path benchmarked on VM ≈ raw O_DIRECT bandwidth.
 
 **C2-REVIEW** 📥
 Draw struct from memory; why separate data alloc; what 15 entries track + overflow behavior; what `counter` means; trace unaligned write → page-split → merge.
-📍 Review here: `scrap_page.h` `scrap_header_t` 31–37 + `_Static_assert` **39** · `scrap_entry_t` 20–23 · `scrap_page_t` 46–52. `scrap_page.c` `scrap_page_alloc` 11–38 (separate alloc **21**) · `coalesce_insert` 63–115 · `scrap_page_merge` 117–130 · `scrap_page_flush` 132–169 (sync OTflush stand-in, replaced in C4). `wsbuffer.c` page-split 115–132 · `scrap_write_chunk` 54–96. `page_index.c` (single global, NO locks → sharded in C3).
+📍 Review here: `scrap_page.h` `scrap_header_t` 31–37 + `_Static_assert` **39** · `scrap_entry_t` 20–23 · `scrap_page_t` 46–52. `scrap_page.c` `scrap_page_alloc` 11–38 (separate alloc **21**) · `coalesce_insert` 63–115 · `scrap_page_merge` 117–130 · `scrap_page_flush` 132–169 (sync OTflush stand-in, replaced in C4). `noxdb.c` page-split 115–132 · `scrap_write_chunk` 54–96. `page_index.c` (single global, NO locks → sharded in C3).
 
 **C2-GATE** 📥
 Single-thread write→flush→read-back→`memcmp` passes (scrap path integrity).
@@ -157,7 +159,7 @@ Stress: overlapping writes during active flush → integrity holds; bounded RAM 
 OSTEP Crash Consistency (fsync, what's durable when). Spec §3.4, §3.5. Concept: read-your-writes, bounce buffers, durability contract.
 
 **C6-BUILD** 📥
-`wsb_read()`: aligned pread + overlay resident scrap pages (bounce buffer if unaligned). `wsb_fsync()`: flush dirty → wait → `fsync(fd)`.
+`nox_read()`: aligned pread + overlay resident scrap pages (bounce buffer if unaligned). `nox_fsync()`: flush dirty → wait → `fsync(fd)`.
 
 **C6-REVIEW** 📥
 Explain: why overlay RAM on disk read; symmetry to partial-page flush; what fsync guarantees after return; why engine keeps no cross-restart state (recovery = LSM's job); bounce buffer when/why.
@@ -175,7 +177,7 @@ Write→read-immediately→correct value (still in RAM); integrity gate per path
 RocksDB/LevelDB docs (memtable, WAL). OSTEP LFS chapter. Concept: skiplist (O(log n) ordered), write-ahead logging.
 
 **C7-BUILD** 📥
-`memtable` (skiplist, size-bounded). `wal` (append-only; put → WAL append *before* memtable insert → small `wsb_write` → scrap path).
+`memtable` (skiplist, size-bounded). `wal` (append-only; put → WAL append *before* memtable insert → small `nox_write` → scrap path).
 
 **C7-REVIEW** 📥
 Explain: why WAL before memtable insert; how skiplist gives ordered O(log n); why WAL appends route to scrap path (the spine); why coarse memtable lock OK (YAGNI §4.3).
@@ -191,10 +193,10 @@ put→WAL→memtable; survives restart via WAL replay (full crash test in C9).
 LevelDB SSTable format (data blocks, index, footer). Concept: immutability, sparse index.
 
 **C8-BUILD** 📥
-`sstable` (immutable: data blocks + sparse index + footer). memtable-full → flush new SSTable via `wsb_write` ≥1MB aligned → fast path.
+`sstable` (immutable: data blocks + sparse index + footer). memtable-full → flush new SSTable via `nox_write` ≥1MB aligned → fast path.
 
 **C8-REVIEW** 📥
-Explain: SSTable layout + why sparse index; why flush = fast-path workload (spine); why immutable + what it buys; one wsb_open per SSTable file.
+Explain: SSTable layout + why sparse index; why flush = fast-path workload (spine); why immutable + what it buys; one nox_open per SSTable file.
 
 **C8-GATE** 📥
 Memtable flush → SSTable on disk via fast path; read a key back from it.
@@ -207,7 +209,7 @@ Memtable flush → SSTable on disk via fast path; read a key back from it.
 Size-tiered vs leveled (why tiered, §4.3). Concept: tombstones, merge iterator, manifest, read amplification (newest→oldest).
 
 **C9-BUILD** 📥
-Size-tiered `compaction` (merge N→1, drop tombstones/overwrites; read via wsb_read, write big via fast path). `manifest`. Full `get` (memtable→SSTables newest→oldest, tombstone=deleted). Recovery (WAL replay + manifest load).
+Size-tiered `compaction` (merge N→1, drop tombstones/overwrites; read via nox_read, write big via fast path). `manifest`. Full `get` (memtable→SSTables newest→oldest, tombstone=deleted). Recovery (WAL replay + manifest load).
 
 **C9-REVIEW** 📥
 Explain: get search order; what a tombstone is + why deletes can't just remove; what compaction drops + why; why compaction hits BOTH paths (spine on real workload); recovery step by step.
@@ -231,7 +233,7 @@ Spec §5 (E1↔C3, E2↔C2, E3↔C1, E4↔integration). `perf stat`, `iostat -x`
 Per experiment: what it proves + baseline + expected graph shape. Explain E2 money graph divergence; why TWO baselines; why p99/p99.9 not mean; CPU util = C1 proof via perf.
 
 **C10-GATE** 📥
-E1–E4 graphs on VM + 4–6 pg ACM/IEEE report. You can defend every number + recite the one-paragraph thesis (`plan.md` final section).
+E1–E4 graphs on the bench box + 4–6 pg ACM/IEEE report. You can defend every number + recite the one-paragraph thesis (`plan.md` final section).
 
 ---
 

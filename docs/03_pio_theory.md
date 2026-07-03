@@ -15,7 +15,7 @@ The default Linux Buffered I/O architecture fails to effectively utilize high-ba
 *   **Concurrency Bottleneck:** To manage the page cache in RAM, the OS uses non-scalable locks (like the XArray spinlock). When high-intensity concurrent writes are issued, the CPU experiences severe lock contention, limiting the concurrency of page management and preventing the SSD from using its internal parallelism.
 *   **The Read-Before-Write Penalty:** If an application issues a partial-page write (e.g., a small unaligned write) that misses the cache, the OS must trigger a slow SSD-read to fill the page before it can be updated. This read-before-write penalty causes massive latency spikes .
 
-## 3. How WSBuffer Solves This
+## 3. How NoxDB Solves This
 Our C implementation must align with the PIO model to achieve maximum performance:
 *   **Maximizing Concurrency (Bypassing the Cache):** By routing large, 4KB-aligned writes (>= 1MB) directly to the SSD via `O_DIRECT`, we bypass the OS page cache. This removes the XArray lock contention, saves CPU resources, and allows the SSD to process massive concurrent writes at peak bandwidth.
 *   **Mitigating Asymmetry (The Scrap Buffer):** By absorbing small and unaligned writes into the RAM-based Scrap Buffer, we immediately acknowledge the write to the user, eliminating the synchronous read-before-write penalty. The background OTflush threads then asynchronously fetch the missing data (Stage-1 reads) and flush fully assembled pages (Stage-2 writes).

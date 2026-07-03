@@ -1,6 +1,6 @@
-# 01. WSBuffer Architecture & Specifications
+# 01. NoxDB Architecture & Specifications
 
-This document serves as the absolute Source of Truth for the WSBuffer architecture implementation. All C code generated must strictly adhere to the data structure layouts, sizes, and routing logic defined here.
+This document serves as the absolute Source of Truth for the NoxDB architecture implementation. All C code generated must strictly adhere to the data structure layouts, sizes, and routing logic defined here.
 
 ## 1. Core Constants & Limits
 *   **Logical Block Size (Alignment):** 4096 bytes (4KB). All direct SSD accesses must be perfectly aligned to this boundary.
@@ -34,10 +34,10 @@ The logic MUST follow this simplified MVP flow:
     *   If the page becomes full, update the header's tag field and enqueue it to OTflush Stage-2.
 
 ## 4. Opportunistic Two-Stage Flushing (OTflush)
-To prevent stalling the foreground user writes, WSBuffer uses asynchronous pthreads to flush data to the SSD.
+To prevent stalling the foreground user writes, NoxDB uses asynchronous pthreads to flush data to the SSD.
 *   **Stage-1 (Queue-1 / Reads):** Background threads dequeue unfilled scrap-pages. They identify "holes" in the 256KB data-zone not covered by valid segments, and issue 4KB-aligned `pread` operations from the SSD to fill these holes (read-before-write).
 *   **Stage-2 (Queue-2 / Writes):** Background threads dequeue fully assembled 256KB scrap-pages and write them back to the SSD. After the write completes, the memory is reclaimed.
 
 ## 5. Concurrency Model
-To avoid the severe lock contention seen in the Linux Kernel's XArray (`xa_lock`) during intensive writes, WSBuffer avoids massive global locks, 13.
+To avoid the severe lock contention seen in the Linux Kernel's XArray (`xa_lock`) during intensive writes, NoxDB avoids massive global locks, 13.
 *   **Per-Page Locks:** Scrap-page updates and flushes must use fine-grained per-scrap-page locks. This ensures that background OTflush threads and foreground user writes do not block each other unnecessarily.

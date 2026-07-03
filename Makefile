@@ -10,6 +10,7 @@ LDFLAGS := -pthread
 SRC   := $(wildcard src/*.c)
 OBJ   := $(SRC:.c=.o)
 BENCH := bench/benchmark
+PROBE := bench/o_direct_probe
 
 REMOTE     ?= root@noxdb
 REMOTE_DIR ?= ~/noxdb
@@ -24,6 +25,13 @@ $(BENCH): $(OBJ) bench/benchmark.o
 
 bench: $(BENCH)
 
+# C0 alignment probe. Standalone: raw syscalls only, NO engine objects linked.
+# Compiles straight from the single .c (pulls NOX_BLOCK_SIZE via -Isrc).
+probe: $(PROBE)
+
+$(PROBE): bench/o_direct_probe.c
+	$(CC) $(CFLAGS) -o $@ $<
+
 # Sync only source/build files to the Proxmox VM (CLAUDE.md §3).
 deploy:
 	rsync -avz -m \
@@ -34,6 +42,6 @@ deploy:
 	    ./ $(REMOTE):$(REMOTE_DIR)/
 
 clean:
-	rm -f src/*.o bench/*.o $(BENCH)
+	rm -f src/*.o bench/*.o $(BENCH) $(PROBE)
 
-.PHONY: all bench deploy clean
+.PHONY: all bench probe deploy clean

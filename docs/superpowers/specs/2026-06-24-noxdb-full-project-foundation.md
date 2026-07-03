@@ -1,4 +1,4 @@
-# WSBuffer Full-Project Foundation
+# NoxDB Full-Project Foundation
 
 **Date:** 2026-06-24
 **Status:** Foundation / roadmap. Not an implementation plan — defines *what* the full project is and *how* the pieces fit. Per-cycle implementation plans are written separately against this document.
@@ -14,7 +14,7 @@ This is the architectural source of truth for the full build, layered on top of 
 | **Deliverable boundary** | Engine **+ thin LSM** | Two systems, two evaluation stories. The LSM is not a demo bolt-on — it is the proof the routing design is correct for a real workload. |
 | **Concurrency model** | **Full**: multi-writer foreground + async OTflush | The benchmark *must* scale writer threads and show no global-lock collapse. This is the paper's core (C2) claim. |
 | **Evaluation baselines** | **Page-cache** (buffered `write()`) + **raw `O_DIRECT`** (no scrap buffer) | The eval harness is a first-class designed component, not an afterthought. |
-| **LSM↔engine file boundary** | **(a)** one engine handle per file | WAL file + each SSTable its own `wsb_open`. Simplest; routing is homogeneous per file. Single-file block-allocator model (b) is explicitly deferred as future work. |
+| **LSM↔engine file boundary** | **(a)** one engine handle per file | WAL file + each SSTable its own `nox_open`. Simplest; routing is homogeneous per file. Single-file block-allocator model (b) is explicitly deferred as future work. |
 
 ---
 
@@ -31,10 +31,10 @@ Two stacked systems. Engine on the bottom, thin LSM on top.
                 │ small appends  │ big seq merges
                 │ (WAL, flush)   │ (SSTable write)
 ┌───────────────▼───────────────▼───────────────┐
-│  L0–L3  WSBUFFER ENGINE                         │
-│  wsb_write ─ router ─┬─ scrap path ── scrap     │
-│  wsb_read            │   buffer (RAM 256KB pgs) │
-│  wsb_fsync           └─ fast path ── O_DIRECT    │
+│  L0–L3  NOXDB ENGINE                         │
+│  nox_write ─ router ─┬─ scrap path ── scrap     │
+│  nox_read            │   buffer (RAM 256KB pgs) │
+│  nox_fsync           └─ fast path ── O_DIRECT    │
 │  async OTflush (2 queues) · per-page locks      │
 └─────────────────────┬───────────────────────────┘
                        │  pread/pwrite/pwritev O_DIRECT
@@ -56,12 +56,12 @@ The thesis in one sentence: *the engine's router is exactly the routing an LSM n
 
 ---
 
-## 3. WSBuffer engine internals (L0–L3)
+## 3. NoxDB engine internals (L0–L3)
 
 ### 3.1 OTflush — two queues, async, opportunistic
 
 ```
-wsb_write → merge into page
+nox_write → merge into page
             │
             ├─ page now full (counter == 256KB) ───────────────► Q2 (write)
             └─ page partial → enqueued to Q1 IMMEDIATELY on create/modify
@@ -78,7 +78,7 @@ Stage-2 threads: pull Q2 → pwrite (pwritev batch if regions contiguous)
 
 Rationale: if Q1 enqueue were triggered by a memory watermark, the system would flood the SSD with Stage-1 reads *exactly* when already under pressure → latency spike. Immediate enqueue + idle-gated execution hides the read-before-write penalty in the SSD's idle time. This is the entire point of "opportunistic" two-stage flushing.
 
-Foreground `wsb_write` never blocks on I/O. A page that fills completely skips Q1 entirely (no read needed) → straight to Q2. That is the win over buffered I/O.
+Foreground `nox_write` never blocks on I/O. A page that fills completely skips Q1 entirely (no read needed) → straight to Q2. That is the win over buffered I/O.
 
 ### 3.2 Concurrency — the anti-XArray design
 
@@ -94,7 +94,7 @@ The 1-byte `tag` field in the 128-byte header exists precisely to record flushin
 
 ```
 Stage-2 dequeue → lock page → tag = FLUSHING
-foreground wsb_write hits a FLUSHING page → DO NOT merge
+foreground nox_write hits a FLUSHING page → DO NOT merge
    → alloc fresh scrap page for that offset
    → swap hash-index pointer to the new page
    → old page drains its single pwrite, then frees itself
@@ -104,16 +104,16 @@ The hash index only ever points at the live (non-flushing) page. New writes accu
 
 **Residual invariant for the implementation plan (not resolved here):** per-region write *ordering* — guarantee the old page's `pwrite` completes before a successor page may flush the same region. Practically near-impossible to violate (the old page is already mid-`pwrite` when the swap happens), but the thesis should state the invariant explicitly. Mechanism: generation counter or per-region in-flight guard.
 
-### 3.4 Durability — `wsb_fsync()`
+### 3.4 Durability — `nox_fsync()`
 
-`wsb_fsync()` = flush all dirty scrap pages → wait for completion → `fsync(fd)` on the underlying file. Contract: after it returns, all prior writes are on stable storage.
+`nox_fsync()` = flush all dirty scrap pages → wait for completion → `fsync(fd)` on the underlying file. Contract: after it returns, all prior writes are on stable storage.
 
 The engine keeps **no cross-restart state** — the RAM buffer is lost on crash, which is correct: it is a write buffer, and durability is whatever was flushed. **Recovery is the LSM's job**, via its WAL. Clean split: engine = durable-on-fsync; LSM = replay.
 
-### 3.5 Read path — `wsb_read()`
+### 3.5 Read path — `nox_read()`
 
 ```
-wsb_read(offset, len):
+nox_read(offset, len):
   1. pread the on-disk region (aligned; bounce buffer if user buf unaligned)
   2. for each resident scrap page overlapping [offset, len):
        lock page; overlay its valid segments onto the read buffer
@@ -144,16 +144,16 @@ Cap total resident bytes. The watermark is **not** the Q1 trigger (see 3.1) — 
 
 | LSM op | Engine call | Path exercised |
 |---|---|---|
-| `put` / `delete` → WAL append | `wsb_write` (small) | scrap |
-| memtable full → flush SSTable | `wsb_write` (≥1MB aligned) | fast |
-| compaction reads inputs | `wsb_read` | disk |
-| compaction writes output | `wsb_write` (big) | fast |
-| `get` → SSTable block | `wsb_read` | disk + buffer overlay |
-| commit point | `wsb_fsync` | flush dirty |
+| `put` / `delete` → WAL append | `nox_write` (small) | scrap |
+| memtable full → flush SSTable | `nox_write` (≥1MB aligned) | fast |
+| compaction reads inputs | `nox_read` | disk |
+| compaction writes output | `nox_write` (big) | fast |
+| `get` → SSTable block | `nox_read` | disk + buffer overlay |
+| commit point | `nox_fsync` | flush dirty |
 
 - `get`: memtable → SSTables newest→oldest; first hit wins; tombstone = deleted.
 - Recovery: replay WAL → rebuild memtable; SSTables loaded from manifest.
-- File boundary: one `wsb_open` handle per file (decision 1(a)) — WAL is one file, each SSTable its own file.
+- File boundary: one `nox_open` handle per file (decision 1(a)) — WAL is one file, each SSTable its own file.
 
 ### 4.3 YAGNI — explicitly cut for "thin"
 
@@ -168,11 +168,13 @@ Baselines: **page-cache** (buffered `write()`) and **raw `O_DIRECT`** (no scrap 
 | # | Proves | Workload | Expected result |
 |---|---|---|---|
 | **E1** | C3 read-before-write | small unaligned writes | scrap path ≫ page-cache at scale; raw `O_DIRECT` cannot do unaligned (forces RMW / fails alignment) |
-| **E2** | C2 concurrency | fixed work, **scale writer threads 1→N** | page-cache plateaus/collapses (XArray contention); WSBuffer scales near-linear to SSD saturation. **The money graph.** |
-| **E3** | C1 bandwidth + CPU | big aligned sequential writes | fast path ≈ raw `O_DIRECT` (both bypass); both ≫ page-cache; WSBuffer/raw burn far less CPU |
-| **E4** | integration | thin LSM, write-heavy mixed | LSM-on-WSBuffer vs LSM-on-buffered-backend → real ops/s win |
+| **E2** | C2 concurrency | fixed work, **scale writer threads 1→N** | page-cache plateaus/collapses (XArray contention); NoxDB scales near-linear to SSD saturation. **The money graph.** |
+| **E3** | C1 bandwidth + CPU | big aligned sequential writes | fast path ≈ raw `O_DIRECT` (both bypass); both ≫ page-cache; NoxDB/raw burn far less CPU |
+| **E4** | integration | thin LSM, write-heavy mixed | LSM-on-NoxDB vs LSM-on-buffered-backend → real ops/s win |
 
-**Metrics:** throughput (MB/s, ops/s), latency p50/p99/p99.9, **CPU utilization** (proves the C1 saving), SSD bandwidth utilization. Tools: the bench harness + `iostat` / `perf` on the Proxmox VM.
+**Metrics:** throughput (MB/s, ops/s), latency p50/p99/p99.9, **CPU utilization** (proves the C1 saving), SSD bandwidth utilization. Tools: the bench harness + `iostat` / `perf` on the bare-metal bench box (see below).
+
+**Measurement environment (decided):** all numbers are taken on **bare-metal Ubuntu Server 24.04 LTS** — not a Proxmox VM or LXC container. A hypervisor injects scheduling jitter and shares its kernel/page cache with the guest, which poisons exactly the two headline metrics (p99/p99.9 tail latency, CPU utilization); a container additionally cannot `mkfs`/`mount` its own filesystem. The device under test is a **dedicated, clean NVMe** (WD SN530) formatted XFS at `/mnt/nvme`, physically separate from the OS disk (Kingston NV2 over USB) so OS I/O never contends with the benchmark. This isolation is what makes the tail-latency and CPU claims defensible.
 
 **Correctness gates (pass/fail — they underpin the credibility of every perf number):**
 - **Integrity:** write → read back → `memcmp`, per path.
@@ -182,15 +184,15 @@ Baselines: **page-cache** (buffered `write()`) and **raw `O_DIRECT`** (no scrap 
 
 ## 6. Module structure (full target)
 
-Dependency direction is strict — **downward only**. The LSM sees only the engine's public API (`wsb_open` / `wsb_write` / `wsb_read` / `wsb_fsync` / `wsb_close`), never its internals.
+Dependency direction is strict — **downward only**. The LSM sees only the engine's public API (`nox_open` / `nox_write` / `nox_read` / `nox_fsync` / `nox_close`), never its internals.
 
 ```
-lsm/   ─► wsbuffer.h  ─► { scrap_page · page_index · otflush · io_direct } ─► config
-bench/ ─► lsm.h + wsbuffer.h + baselines
+lsm/   ─► noxdb.h  ─► { scrap_page · page_index · otflush · io_direct } ─► config
+bench/ ─► lsm.h + noxdb.h + baselines
 
 ENGINE
-  wsbuffer_config.h     constants                                    (exists)
-  wsbuffer.{h,c}        router + wsb_open/write/READ/FSYNC/close      (extend)
+  noxdb_config.h     constants                                    (exists)
+  noxdb.{h,c}        router + nox_open/write/READ/FSYNC/close      (extend)
   scrap_page.{h,c}      + per-page mutex, tag=FLUSHING protocol       (extend)
   page_index.{h,c}      + sharded bucket locks (anti-XArray)          (extend)
   otflush.{h,c}         Q1/Q2, thread pool, Stage-1/2, Bcount         (NEW)
