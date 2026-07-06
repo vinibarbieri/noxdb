@@ -3,11 +3,13 @@
 **A user-space asynchronous I/O storage engine in C that bypasses the Linux page cache to keep modern NVMe SSDs saturated.**
 
 ![status](https://img.shields.io/badge/status-early%20WIP-orange)
-![language](https://img.shields.io/badge/language-C11-blue)
+![language](https://img.shields.io/badge/language-C-blue)
 ![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20O__DIRECT-lightgrey)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-> **Status: early and in active development.** This is a research/portfolio project built in public. The MVP is write-only and not production-ready. Interfaces and internals change cycle to cycle. Follow the build → see [Roadmap](#roadmap).
+> **Status: early and in active development.** This is a research/portfolio project built in public. The MVP is write-only and not production-ready. Interfaces and internals change cycle to cycle.
+>
+> **Follow the build:** I document the engineering process (benchmarks, bugs, and design trade-offs) in weekly threads on X: **[@ViniBarbieri_11](https://x.com/ViniBarbieri_11)**. See the [Roadmap](#roadmap) below for where it's headed.
 
 ---
 
