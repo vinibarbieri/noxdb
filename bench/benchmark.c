@@ -4,8 +4,8 @@
  * Issues a mix of (a) large 4K-aligned writes (fast path -> O_DIRECT) and
  * (b) small unaligned writes (scrap path), reports throughput.
  *
- * MUST run on the Proxmox Linux VM with an NVMe-backed XFS/EXT4 filesystem.
- * O_DIRECT is unsupported on macOS/tmpfs, so this will NOT run locally.
+ * MUST run on Linux against an NVMe-backed XFS/EXT4 filesystem (the bench box,
+ * /mnt/nvme). O_DIRECT is unsupported on macOS/tmpfs, so this will NOT run locally.
  *
  *   usage: ./benchmark <backing-file-on-nvme>
  */

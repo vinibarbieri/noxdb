@@ -1,7 +1,8 @@
 # noxdb - build + deploy.
 #
 # NOTE: O_DIRECT is a Linux feature; the benchmark binary must be built and run
-# on the Proxmox VM with an NVMe-backed XFS/EXT4 filesystem. Do not run locally.
+# on the bare-metal bench box against the NVMe-backed XFS/EXT4 filesystem at
+# /mnt/nvme. Do not run locally (macOS/other FS will not honor O_DIRECT).
 
 CC      := cc
 CFLAGS  := -std=c11 -O2 -Wall -Wextra -Iinclude -Isrc
@@ -32,7 +33,7 @@ probe: $(PROBE)
 $(PROBE): bench/o_direct_probe.c
 	$(CC) $(CFLAGS) -o $@ $<
 
-# Sync only source/build files to the Proxmox VM (CLAUDE.md §3).
+# Sync only source/build files to the bench box (rsync, key auth, host alias).
 deploy:
 	rsync -avz -m \
 	    --exclude='.git' \

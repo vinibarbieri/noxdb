@@ -21,7 +21,7 @@ a.out
 
 # ── Test / runtime data ───────────────────────────────────────────
 # O_DIRECT backing files, SSTables, WAL, manifests written during a run
-# (these live on the Proxmox VM, but ignore locally too just in case).
+# (these live on the bench box under /mnt/nvme, but ignore locally too).
 *.dat
 *.db
 *.wal
@@ -49,4 +49,7 @@ vgcore.*
 *.orig
 compile_commands.json
 .cache/
-build-in-public
+
+# ── Private / dev-only (not for public repo) ──────────────────────
+.dev/
+CLAUDE.md
