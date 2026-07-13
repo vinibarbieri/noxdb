@@ -18,7 +18,7 @@
 
 struct nox_engine {
     int           fd;
-    page_index_t *idx;
+    page_index_t *idx; // hash: page-base -> resident scrap page
     uint16_t      ssd_id;   /* single SSD in the MVP */
 };
 
