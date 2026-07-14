@@ -13,7 +13,7 @@ OBJ   := $(SRC:.c=.o)
 BENCH := bench/benchmark
 PROBE := bench/o_direct_probe
 
-REMOTE     ?= root@noxdb
+REMOTE     ?= noxdb
 REMOTE_DIR ?= ~/noxdb
 
 all: $(BENCH)
