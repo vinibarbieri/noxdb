@@ -14,12 +14,11 @@ struct page_index {
     scrap_page_t *buckets[PI_BUCKETS];
 };
 
-/* Hash a 256KB-aligned base. Shift out the 18 always-zero low bits first so the
- * page number itself spreads across buckets, then mix with a Fibonacci constant. */
+/* Hash a 256KB-aligned base: page number, Fibonacci-mixed, top 10 bits (64-log2(PI_BUCKETS)). */
 static inline uint32_t pi_hash(uint64_t base)
 {
     uint64_t page_no = base / NOX_DATAZONE_SIZE;
-    return (uint32_t)((page_no * 0x9E3779B97F4A7C15ull) >> 46) & PI_MASK;
+    return (uint32_t)((page_no * 0x9E3779B97F4A7C15ull) >> 54) & PI_MASK;
 }
 
 page_index_t *page_index_create(void)
