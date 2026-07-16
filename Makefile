@@ -12,6 +12,7 @@ SRC   := $(wildcard src/*.c)
 OBJ   := $(SRC:.c=.o)
 BENCH := bench/benchmark
 PROBE := bench/o_direct_probe
+GATE  := bench/scrap_integrity_test
 
 REMOTE     ?= noxdb
 REMOTE_DIR ?= ~/noxdb
@@ -25,6 +26,13 @@ $(BENCH): $(OBJ) bench/benchmark.o
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 bench: $(BENCH)
+
+# C2 acceptance gate. Links the full engine + the gate driver.
+# Run on the bench box: ./bench/scrap_integrity_test /mnt/nvme/c2gate.dat
+gate: $(GATE)
+
+$(GATE): $(OBJ) bench/scrap_integrity_test.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # C0 alignment probe. Standalone: raw syscalls only, NO engine objects linked.
 # Compiles straight from the single .c (pulls NOX_BLOCK_SIZE via -Isrc).
@@ -43,6 +51,6 @@ deploy:
 	    ./ $(REMOTE):$(REMOTE_DIR)/
 
 clean:
-	rm -f src/*.o bench/*.o $(BENCH) $(PROBE)
+	rm -f src/*.o bench/*.o $(BENCH) $(PROBE) $(GATE)
 
-.PHONY: all bench probe deploy clean
+.PHONY: all bench probe gate deploy clean
