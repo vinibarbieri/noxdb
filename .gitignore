@@ -9,15 +9,16 @@
 
 # Compiled binaries (Makefile output + per-cycle probes/benches).
 # Sources are .c/.h; these are the extensionless build products.
-bench/benchmark
-bench/bench_engine
-bench/bench_lsm
-study/fast_path
-o_direct_probe
-*_probe
+bench/*
+!bench/*.c
+!bench/*.h
 *.out
 a.out
 /build/
+
+# macOS debug symbol bundles (dSYM from -g builds, e.g. tsan)
+*.dSYM/
+
 
 # ── Test / runtime data ───────────────────────────────────────────
 # O_DIRECT backing files, SSTables, WAL, manifests written during a run
