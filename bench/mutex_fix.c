@@ -2,20 +2,17 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-// Declare pthread_mutex_t -> PTHREAD_MUTEX_INITIALIZER
 static pthread_mutex_t counterMutex = PTHREAD_MUTEX_INITIALIZER;
 
 int counter = 0;
 
 void* increment(void *arg) {
-    // lock
+    pthread_mutex_lock(&counterMutex);
     for (int i = 0; i < 1000000; i++) {
-        pthread_mutex_lock(&counterMutex);
         counter++;
-        pthread_mutex_unlock(&counterMutex);
-
     }
-    //unlock
+    pthread_mutex_unlock(&counterMutex);
+
     return NULL;
 }
 
