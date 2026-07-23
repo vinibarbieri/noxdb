@@ -1,8 +1,11 @@
 /*
  * page_index.h - Hash table mapping a 256KB-aligned file offset to its live
  * scrap page. Keyed by NOX_PAGE_BASE(offset). Separate chaining via
- * scrap_page_t.next. (Index structure not specified by docs; chosen for the MVP
- * because it is sparse and tolerates large/random offsets.)
+ * scrap_page_t.next. Bucket lists are guarded by SHARDED locks (docs/01 §5):
+ * get_or_create/remove lock only the target shard, so concurrent writers on
+ * different pages don't serialize. Locking is internal; signatures are
+ * unchanged. (Index structure not specified by docs; chosen for the MVP because
+ * it is sparse and tolerates large/random offsets.)
  */
 #ifndef PAGE_INDEX_H
 #define PAGE_INDEX_H

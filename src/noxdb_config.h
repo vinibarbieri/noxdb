@@ -28,6 +28,19 @@
 /* The header carries an array of exactly 15 index entries (8B each). (docs/01 §2) */
 #define NOX_MAX_ENTRIES      15u
 
+/* Page-index shard count: the index's bucket lists are partitioned across this
+ * many independent mutexes so concurrent writers on different pages don't
+ * serialize on one global lock (the XArray bottleneck; docs/01 §5).
+ * ENGINEERING CHOICE, not dictated by the paper: 64 > NVMe queue depth (SN530
+ * ~QD32) and > bench box cores, so false contention is negligible; finer (e.g.
+ * per-bucket) locking buys nothing yet risks false sharing. MUST be a power of
+ * two (masked with NOX_INDEX_SHARDS-1). See docs/01 §5 for full rationale. */
+#define NOX_INDEX_SHARDS     64u
+
+/* Cache-line size: shard locks are padded to this so two distinct shard mutexes
+ * never share a line (no false sharing when locked from different cores). */
+#define NOX_CACHELINE        64u
+
 /* Page-flush state values stored in scrap_header_t.tag. */
 #define NOX_TAG_OPEN         0u   /* page still accepting writes */
 #define NOX_TAG_FULL         1u   /* data zone fully covered, queued/flushed */
