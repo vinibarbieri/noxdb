@@ -13,6 +13,7 @@ OBJ   := $(SRC:.c=.o)
 BENCH := bench/benchmark
 PROBE := bench/o_direct_probe
 GATE  := bench/scrap_integrity_test
+GATE_C3 := bench/concurrency_test
 
 REMOTE     ?= noxdb
 REMOTE_DIR ?= ~/noxdb
@@ -34,6 +35,20 @@ gate: $(GATE)
 $(GATE): $(OBJ) bench/scrap_integrity_test.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# C3 acceptance gate: concurrent scrap path. Optimized build (throughput + integrity).
+# Run on the bench box: ./bench/concurrency_test /mnt/nvme/c3gate.dat <nthreads>
+gate-c3: $(GATE_C3)
+
+$(GATE_C3): $(OBJ) bench/concurrency_test.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# C3 race gate: single instrumented compile of all engine sources + the driver,
+# so ThreadSanitizer objects never mix with the -O2 objects. Bench box only.
+# Run: ./bench/concurrency_test_tsan /mnt/nvme/c3gate.dat <nthreads>
+gate-c3-tsan:
+	$(CC) $(CFLAGS) -fsanitize=thread -g -o bench/concurrency_test_tsan \
+	    $(SRC) bench/concurrency_test.c $(LDFLAGS)
+
 # C0 alignment probe. Standalone: raw syscalls only, NO engine objects linked.
 # Compiles straight from the single .c (pulls NOX_BLOCK_SIZE via -Isrc).
 probe: $(PROBE)
@@ -51,6 +66,6 @@ deploy:
 	    ./ $(REMOTE):$(REMOTE_DIR)/
 
 clean:
-	rm -f src/*.o bench/*.o $(BENCH) $(PROBE) $(GATE)
+	rm -f src/*.o bench/*.o $(BENCH) $(PROBE) $(GATE) $(GATE_C3) bench/concurrency_test_tsan
 
-.PHONY: all bench probe gate deploy clean
+.PHONY: all bench probe gate gate-c3 gate-c3-tsan deploy clean
