@@ -67,7 +67,10 @@ static int scrap_write_chunk(nox_engine_t *e, uint64_t base, uint32_t intra,
      * GET-THEN-LOCK WINDOW: between the call above returning `p` and this lock,
      * another thread could remove+free the same page. The C3 gate writes DISJOINT
      * offsets (each base owned by one thread) so it cannot fire; the general fix
-     * is the C5 tag=FLUSHING pointer-swap. */
+     * is the C5 tag=FLUSHING pointer-swap.
+     * Note: the OVERFLOW and full-page paths below also call scrap_page_flush()
+     * and page_index_remove() with p->lock released, so this "disjoint bases
+     * only" precondition applies to the entire function, not just this lock. */
     pthread_mutex_lock(&p->lock);
     scrap_status_t st = scrap_page_merge(p, buf, intra, len);
 

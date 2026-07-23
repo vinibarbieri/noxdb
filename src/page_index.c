@@ -23,6 +23,11 @@ typedef union {
     char            pad[NOX_CACHELINE];
 } pi_shard_t;
 
+_Static_assert((NOX_INDEX_SHARDS & (NOX_INDEX_SHARDS - 1u)) == 0,
+               "NOX_INDEX_SHARDS must be a power of two (pi_shard masks with -1)");
+_Static_assert(sizeof(pi_shard_t) == NOX_CACHELINE,
+               "shard lock must be exactly one cache line (no false sharing)");
+
 struct page_index {
     /* _Alignas lives on the member, not the typedef: C11 6.7.5p2 forbids an
      * alignment-specifier on a typedef declaration, so `} _Alignas(...) name;`
