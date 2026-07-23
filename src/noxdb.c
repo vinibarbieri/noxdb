@@ -61,6 +61,13 @@ static int scrap_write_chunk(nox_engine_t *e, uint64_t base, uint32_t intra,
         return -1;
     }
 
+    /* LOCK ORDER (docs/01 §5): the index shard lock is released INSIDE
+     * page_index_get_or_create before we take the per-page lock here, so the two
+     * lock classes are never held at once -> no lock-order inversion.
+     * GET-THEN-LOCK WINDOW: between the call above returning `p` and this lock,
+     * another thread could remove+free the same page. The C3 gate writes DISJOINT
+     * offsets (each base owned by one thread) so it cannot fire; the general fix
+     * is the C5 tag=FLUSHING pointer-swap. */
     pthread_mutex_lock(&p->lock);
     scrap_status_t st = scrap_page_merge(p, buf, intra, len);
 

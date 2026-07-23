@@ -33,6 +33,9 @@ scrap_page_t *scrap_page_alloc(uint64_t base, uint16_t ssd_id)
     p->data       = zone;
     p->base       = base;
     p->next       = NULL;
+    /* Per-page lock (docs/01 §5): guards this page's header+data during merge
+     * and flush. Distinct from the index shard locks; the two are never held
+     * simultaneously (see scrap_write_chunk), so there is no lock-order risk. */
     pthread_mutex_init(&p->lock, NULL);
     return p;
 }
