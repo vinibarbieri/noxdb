@@ -9,9 +9,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Power-of-two bucket count so the mask is a cheap AND. */
-#define PI_BUCKETS 1024u
-#define PI_MASK    (PI_BUCKETS - 1u)
+/* PI_BITS is the single source of truth for the index geometry: the Fibonacci
+ * hash keeps the TOP PI_BITS bits of the 64-bit product, so the shift is exactly
+ * 64 - PI_BITS and the bucket count is exactly 2^PI_BITS. Deriving both (instead
+ * of hardcoding 1024 and 54 independently) makes the two impossible to
+ * desynchronise: change PI_BITS and the shift follows.
+ * No mask is needed - the shift alone bounds the result to [0, PI_BUCKETS). */
+#define PI_BITS    10u
+#define PI_BUCKETS (1u << PI_BITS)
+#define PI_SHIFT   (64u - PI_BITS)
 
 /*
  * Cache-line-padded shard lock. Padding + alignment guarantee two distinct
@@ -23,8 +29,11 @@ typedef union {
     char            pad[NOX_CACHELINE];
 } pi_shard_t;
 
-_Static_assert((NOX_INDEX_SHARDS & (NOX_INDEX_SHARDS - 1u)) == 0,
-               "NOX_INDEX_SHARDS must be a power of two (pi_shard masks with -1)");
+/* pi_shard slices NOX_INDEX_SHARD_BITS out of a PI_BITS-wide bucket index, so
+ * the bucket index must be at least as wide as the shard index. (Power-of-two
+ * shard count needs no assert: NOX_INDEX_SHARDS is defined as 1u << BITS.) */
+_Static_assert(PI_BITS >= NOX_INDEX_SHARD_BITS,
+               "PI_BITS must be >= NOX_INDEX_SHARD_BITS (else shards outnumber buckets)");
 _Static_assert(sizeof(pi_shard_t) == NOX_CACHELINE,
                "shard lock must be exactly one cache line (no false sharing)");
 
@@ -40,18 +49,31 @@ struct page_index {
     scrap_page_t *buckets[PI_BUCKETS];       /* bucket heads (chained) */
 };
 
-/* Hash a 256KB-aligned base: page number, Fibonacci-mixed, top 10 bits. */
+/* Hash a 256KB-aligned base: page number, Fibonacci-mixed, top PI_BITS bits.
+ * Multiplying by 2^64/phi spreads the input's entropy toward the HIGH bits, so
+ * the top slice is the well-mixed one; shifting it down to bit 0 yields a value
+ * already in [0, PI_BUCKETS) with no mask. */
 static inline uint32_t pi_hash(uint64_t base)
 {
     uint64_t page_no = base / NOX_DATAZONE_SIZE;
-    return (uint32_t)((page_no * 0x9E3779B97F4A7C15ull) >> 54) & PI_MASK;
+    return (uint32_t)((page_no * 0x9E3779B97F4A7C15ull) >> PI_SHIFT);
 }
 
-/* Map a bucket index to its shard. Low bits of the Fibonacci-mixed bucket are
- * well distributed, so a plain mask spreads pages evenly across shards. */
+/*
+ * Map a bucket index to its shard: the TOP NOX_INDEX_SHARD_BITS of the bucket.
+ *
+ * Deliberately the top slice, not `bucket & (NOX_INDEX_SHARDS-1)`. Fibonacci
+ * hashing only guarantees good mixing in the HIGH bits of the product; the low
+ * bits of the retained slice are its weakest. Masking them made sequentially
+ * numbered pages - the common case, and exactly what the C3 gate writes - land
+ * on far fewer shards than exist: measured over 64 consecutive page numbers,
+ * the low-bit mask used 20 of 64 shards, the top slice uses 55. Over a large
+ * working set both converge, so this was a small-working-set contention loss,
+ * not a correctness bug.
+ */
 static inline uint32_t pi_shard(uint32_t bucket)
 {
-    return bucket & (NOX_INDEX_SHARDS - 1u);
+    return bucket >> (PI_BITS - NOX_INDEX_SHARD_BITS);
 }
 
 page_index_t *page_index_create(void)
