@@ -64,6 +64,7 @@ a code comment at the site where it applies.
 | D3 | Requeue-on-busy loops over a ring queue (lines 9-10, 23-24) | Requeue-on-busy must **block on a condvar with backoff** | With blocking I/O and one thread per queue, a requeue loop with nothing else runnable is a hot spin burning a core. See §6. |
 | D4 | SXArray with delayed tree-structure updates | Sharded hash index (`page_index.c`, 64 padded shard locks, built in C3) | Already decided and built in C3. Same goal — no single non-scalable lock. |
 | D5 | Unbounded scrap-buffer growth is bounded by a separate eviction mechanism | Q1/Q2 are **unbounded** in C4 | RAM bounding is the eviction watermark, which the board assigns to C5-BUILD ("high/low throttle") and C5-GATE ("bounded RAM under overload"). Blocking the producer in C4 would contradict C4-GATE's "foreground never stalls". A soft-threshold `stderr` warning is emitted; nothing blocks. |
+| D6 | A page may be in Q1 and Q2 simultaneously; Stage-1 **discards** a full page (lines 4-5) because the foreground already queued it to Q2 | **Single queue membership**: a page is in at most one queue. Stage-1 **forwards** a full page to Q2 instead of discarding it | Dual membership is a use-after-free in a POSIX port: Stage-2 writes back and reclaims the page while Q1 still holds the pointer, and Stage-1 then dereferences freed memory. The kernel is protected by page refcounts; we have none. Forwarding preserves the actual win — a full page still skips the Stage-1 `pread` entirely — at the cost of one queue hop, and removes the hazard by construction. See §4.4. |
 
 ## 4. Page lifetime and locking (the core decision)
 
@@ -120,6 +121,29 @@ A `detached` flag in `scrap_page_t` (outside the header) records that the page i
 in the index, so Stage-2 skips the index step. This is the analogue of Algorithm 2's
 `page is invalid` check (line 14).
 
+### 4.4 Single queue membership (ownership rule)
+
+**Invariant: a page is in at most one queue at any instant.** `scrap_page_t` carries a single
+`in_queue` flag, set and cleared under `p->lock`.
+
+Why it is mandatory: Algorithm 2 permits a page to be in Q1 (partial) and Q2 (filled by the
+foreground) at once. Stage-2 then writes it back and reclaims it — while Q1 still holds the
+pointer — and Stage-1 subsequently evaluates `if page is full` on freed memory. The kernel
+implementation is shielded by page refcounts, which a user-space port does not have.
+Adding a refcount would pull C5's lifetime machinery into C4.
+
+Rules that maintain it:
+- Foreground creates a partial page → push Q1, set `in_queue`.
+- Foreground fills a page that is **already in Q1** → do **not** push to Q2. It stays where it
+  is; the tag becomes `NOX_TAG_FULL`.
+- Foreground fills a page **not** in any queue (born full, or previously drained) → push Q2.
+- Stage-1 pops a full page → **forward it to Q2 without any `pread`** (the Stage-1 read is
+  still skipped, which is the whole point) rather than discarding it.
+- Stage-2 is therefore the only site that frees a page, and only after detaching it from the
+  index — so at free time the page is unreachable from both the index and both queues.
+
+Consequence: one intrusive link field (`qnext`) in `scrap_page_t`, not two.
+
 ## 5. Components
 
 ### 5.1 `src/queue.{h,c}` — MPMC FIFO
@@ -129,29 +153,29 @@ Mutex + condition variable, unbounded, **intrusive** links.
 ```c
 typedef struct nox_queue nox_queue_t;
 
-nox_queue_t *nox_queue_create(size_t link_offset); /* offset of the link field in scrap_page_t */
-void         nox_queue_destroy(nox_queue_t *q);
-void         nox_queue_push(nox_queue_t *q, scrap_page_t *p);   /* never blocks */
+nox_queue_t  *nox_queue_create(void);
+void          nox_queue_destroy(nox_queue_t *q);
+void          nox_queue_push(nox_queue_t *q, scrap_page_t *p);  /* never blocks */
 scrap_page_t *nox_queue_pop(nox_queue_t *q);                    /* blocks; NULL on shutdown */
-void         nox_queue_shutdown(nox_queue_t *q);                /* wake all consumers */
-size_t       nox_queue_depth(const nox_queue_t *q);
+scrap_page_t *nox_queue_pop_if_base(nox_queue_t *q, uint64_t want_base); /* batching */
+void          nox_queue_shutdown(nox_queue_t *q);               /* wake all consumers */
+size_t        nox_queue_depth(nox_queue_t *q);
 ```
 
-Two link fields — `q1_next` and `q2_next` — live in `scrap_page_t`, **not** in
-`scrap_header_t`: the header is pinned at exactly 128 bytes by the `_Static_assert` at
-`scrap_page.h:39`, and a page can legitimately be in both queues at once (partial in Q1, then
-filled by the foreground and pushed to Q2). Intrusive links also keep `malloc` off the
-foreground enqueue path, which matters for the p99 numbers in C10.
+The link field `qnext` lives in `scrap_page_t`, **not** in `scrap_header_t`: the header is
+pinned at exactly 128 bytes by the `_Static_assert` at `scrap_page.h:39`. One field suffices
+because of the single-membership invariant (§4.4). An intrusive link also keeps `malloc` off
+the foreground enqueue path, which matters for the p99 numbers in C10.
 
-Push is idempotent per queue: an `in_q1` / `in_q2` flag on the page, tested under `p->lock`,
-prevents double-enqueue.
+`nox_queue_pop_if_base()` pops the head only if `head->base == want_base`, atomically under
+the queue lock. Stage-2's `pwritev` batching (§5.6) is built on it: no peek-then-pop race.
 
 ### 5.2 `src/otflush.{h,c}`
 
 ```c
 typedef struct otflush otflush_t;
 
-otflush_t *otflush_start(int fd);          /* create queues, spawn pools */
+otflush_t *otflush_start(page_index_t *idx, int fd);  /* create queues, spawn pools */
 void otflush_enqueue_partial(otflush_t *o, scrap_page_t *p);  /* -> Q1 */
 void otflush_enqueue_full(otflush_t *o, scrap_page_t *p);     /* -> Q2, skips Stage-1 */
 int  otflush_drain(otflush_t *o);          /* block until Q1 and Q2 are empty */
@@ -197,8 +221,9 @@ was standing in for:
 - New partial page → `otflush_enqueue_partial()` **immediately** (paper §3.4: "whenever an
   unfilled page is generated, the scrap buffer inserts it to Queue-1"). It stays in the index
   and keeps absorbing writes.
-- Page becomes full → `otflush_enqueue_full()`, **skipping Q1** — no holes means no Stage-1
-  read at all. This is the asymmetry win (`docs/03` §3).
+- Page becomes full → `otflush_enqueue_full()`, which pushes to Q2 **skipping Q1** *only if
+  the page is not already queued* (§4.4). Either way no Stage-1 `pread` ever runs on it — no
+  holes means nothing to read. This is the asymmetry win (`docs/03` §3).
 - Entry overflow (`:77-93`) → mark `NOX_TAG_SEALED` and detach, instead of flushing inline.
   The page is already in Q1 and drains from there; the foreground allocates a fresh page for
   the same base and retries the merge.
