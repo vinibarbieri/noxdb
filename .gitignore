@@ -54,3 +54,6 @@ compile_commands.json
 # ── Private / dev-only (not for public repo) ──────────────────────
 .dev/
 CLAUDE.md
+.claude
+# local-only design docs (superpowers specs/plans)
+docs/superpowers/
