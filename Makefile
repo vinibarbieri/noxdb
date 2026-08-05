@@ -58,6 +58,14 @@ toy-pc: bench/pc_queue_toy.c
 toy-pc-tsan: bench/pc_queue_toy.c
 	$(CC) $(CFLAGS) -O1 -fsanitize=thread -g -o bench/pc_queue_toy_tsan $< $(LDFLAGS)
 
+# C4-S3 study toy: scatter-gather (pwritev) + short-write fixup.
+# Part C (fixup, fake writer) is pure RAM and runs on the laptop; parts A and B
+# need O_DIRECT and are compiled in only on Linux. Standalone, no engine objects.
+#   ./bench/pwritev_toy                      # part C only
+#   ./bench/pwritev_toy /mnt/nvme/s3toy.dat  # A + B + C
+toy-pwritev: bench/pwritev_toy.c
+	$(CC) $(CFLAGS) -o bench/pwritev_toy $<
+
 # C0 alignment probe. Standalone: raw syscalls only, NO engine objects linked.
 # Compiles straight from the single .c (pulls NOX_BLOCK_SIZE via -Isrc).
 probe: $(PROBE)
@@ -76,6 +84,6 @@ deploy:
 
 clean:
 	rm -f src/*.o bench/*.o $(BENCH) $(PROBE) $(GATE) $(GATE_C3) bench/concurrency_test_tsan \
-	    bench/pc_queue_toy bench/pc_queue_toy_tsan
+	    bench/pc_queue_toy bench/pc_queue_toy_tsan bench/pwritev_toy
 
-.PHONY: all bench probe gate gate-c3 gate-c3-tsan toy-pc toy-pc-tsan deploy clean
+.PHONY: all bench probe gate gate-c3 gate-c3-tsan toy-pc toy-pc-tsan toy-pwritev deploy clean

@@ -43,7 +43,7 @@ To overcome these limitations, we implement a **Buffer-Minimized Data Access Mec
 
 Large write requests (≥ 1 MB) that are perfectly aligned to the logical block size bypass the scrap buffer entirely. The `O_DIRECT` flag sends data directly from user-space to the SSD, completely bypassing the kernel buffer cache.
 
-> **TLPI Constraint:** To prevent `EINVAL` errors, the memory buffer, file offset, and transfer size must all be exact multiples of the disk's logical block size (4096 bytes). User-space memory for this path **must** use `posix_memalign()` — standard `malloc()` is forbidden.
+> **TLPI Constraint:** To prevent `EINVAL` errors, the memory buffer, file offset, and transfer size must all be exact multiples of 4096 bytes. User-space memory for this path **must** use `posix_memalign()` — standard `malloc()` is forbidden. (4096 is NoxDB policy, not the bench box's device minimum, which is 512 — see `docs/02` §1 for why the stricter value is deliberate.)
 
 ### 3.2. Scrap Buffer
 
