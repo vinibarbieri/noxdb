@@ -49,6 +49,15 @@ gate-c3-tsan:
 	$(CC) $(CFLAGS) -fsanitize=thread -g -o bench/concurrency_test_tsan \
 	    $(SRC) bench/concurrency_test.c $(LDFLAGS)
 
+# C4-S2 study toy: unbounded MPMC queue (mutex + condvar), 4 prod / 4 cons.
+# Pure RAM, no O_DIRECT: runs on the laptop. Standalone, no engine objects.
+toy-pc: bench/pc_queue_toy.c
+	$(CC) $(CFLAGS) -o bench/pc_queue_toy $< $(LDFLAGS)
+
+# Same toy under ThreadSanitizer (-O1 -g: TSan needs frame pointers to be useful).
+toy-pc-tsan: bench/pc_queue_toy.c
+	$(CC) $(CFLAGS) -O1 -fsanitize=thread -g -o bench/pc_queue_toy_tsan $< $(LDFLAGS)
+
 # C0 alignment probe. Standalone: raw syscalls only, NO engine objects linked.
 # Compiles straight from the single .c (pulls NOX_BLOCK_SIZE via -Isrc).
 probe: $(PROBE)
@@ -66,6 +75,7 @@ deploy:
 	    ./ $(REMOTE):$(REMOTE_DIR)/
 
 clean:
-	rm -f src/*.o bench/*.o $(BENCH) $(PROBE) $(GATE) $(GATE_C3) bench/concurrency_test_tsan
+	rm -f src/*.o bench/*.o $(BENCH) $(PROBE) $(GATE) $(GATE_C3) bench/concurrency_test_tsan \
+	    bench/pc_queue_toy bench/pc_queue_toy_tsan
 
-.PHONY: all bench probe gate gate-c3 gate-c3-tsan deploy clean
+.PHONY: all bench probe gate gate-c3 gate-c3-tsan toy-pc toy-pc-tsan deploy clean
