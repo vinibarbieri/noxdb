@@ -9,6 +9,7 @@
 #define IO_DIRECT_H
 
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <stddef.h>
 
 /* open() the path O_RDWR|O_DIRECT|O_CREAT. Returns fd or -1 (errno set). */
@@ -30,5 +31,15 @@ ssize_t io_direct_pwrite(int fd, const void *buf, size_t len, off_t off);
  * Returns bytes read, or -1 (errno set).
  */
 ssize_t io_direct_pread(int fd, void *buf, size_t len, off_t off);
+
+/*
+ * Write EVERY byte, or fail. Returns the total byte count on success, -1 with
+ * errno set on failure. A short write is resumed at IOVEC granularity: complete
+ * iovecs are dropped, the first incomplete one is reissued whole. Requires the
+ * source buffers to be stable and the destination to be a fixed offset (see the
+ * idempotence note in io_direct.c).
+ */
+ssize_t io_direct_pwrite_all(int fd, const void *buf, size_t len, off_t off);
+ssize_t io_direct_pwritev_all(int fd, struct iovec *iov, int iovcnt, off_t off);
 
 #endif /* IO_DIRECT_H */

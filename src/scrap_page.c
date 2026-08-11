@@ -23,9 +23,28 @@ scrap_page_t *scrap_page_alloc(uint64_t base, uint16_t ssd_id)
         return NULL;
     }
 
-    /* Zero the data zone: bytes in "holes" (regions never written by the user)
-     * default to 0; they get overwritten by read-before-write at flush time. */
-    memset(zone, 0, NOX_DATAZONE_SIZE);
+    /* DELIBERATELY NOT ZEROED. Measured on the bench box: zeroing here cost
+     * 120 us of FOREGROUND latency per page (C4-GATE, 1 thread: 25 ms of write
+     * time over 208 pages; p99 = 115683 ns). The 256KB zone is fresh virtual
+     * memory, so the memset was touching all 64 of its 4K pages eagerly and
+     * paying 64 minor faults synchronously, on the caller's thread. Total for
+     * the 8-thread gate: 116075 minor faults, ~51 ms — the entire wall time.
+     *
+     * It is safe to skip because every byte of the zone is overwritten before
+     * it can reach the disk. The union of the two producers is exactly the
+     * whole zone, with no gap:
+     *   - the entry list covers what the user wrote (scrap_page_merge);
+     *   - scrap_page_apply_holes fills the exact COMPLEMENT of that list from
+     *     disk, and hole_ranges is defined as that complement.
+     * A page that skips Stage-1 does so only when scrap_page_is_full(), i.e.
+     * counter == NOX_DATAZONE_SIZE, i.e. the entries alone cover everything.
+     * A page whose Stage-1 pread fails is dropped, never written.
+     *
+     * The faults themselves do not vanish — they move. The foreground now
+     * faults only the handful of 4K pages it actually writes into, spread
+     * across its writes; Stage-1's apply_holes faults the rest, on a background
+     * thread. Moving work off the critical path is the entire premise of C4,
+     * so paying for the whole zone up front was working against the cycle. */
 
     memset(&p->hdr, 0, sizeof(p->hdr));
     p->hdr.ssd_id = ssd_id;
@@ -33,6 +52,9 @@ scrap_page_t *scrap_page_alloc(uint64_t base, uint16_t ssd_id)
     p->data       = zone;
     p->base       = base;
     p->next       = NULL;
+    p->qnext    = NULL;
+    p->in_queue = 0;
+    p->detached = 0;
     /* Per-page lock (docs/01 §5): guards this page's header+data during merge
      * and flush. Distinct from the index shard locks; the two are never held
      * simultaneously (see scrap_write_chunk), so there is no lock-order risk. */
@@ -132,41 +154,126 @@ scrap_status_t scrap_page_merge(scrap_page_t *p, const void *buf,
     return SCRAP_OK;
 }
 
-int scrap_page_flush(scrap_page_t *p, int fd)
+uint32_t scrap_page_hole_ranges(const scrap_page_t *p, scrap_entry_t *out,
+                                uint32_t max)
 {
-    if (scrap_page_is_full(p)) {
-        /* Full page: every byte is valid user data — write it straight out.
-         * base is 256KB-aligned (=> 4K-aligned), len is 256KB, data is aligned. */
-        ssize_t w = io_direct_pwrite(fd, p->data, NOX_DATAZONE_SIZE,
-                                     (off_t)p->base);
-        p->hdr.tag = NOX_TAG_FULL;
-        return (w == (ssize_t)NOX_DATAZONE_SIZE) ? 0 : -1;
+    uint32_t n      = 0;
+    uint32_t cursor = 0;   /* first byte not yet accounted for */
+
+    /* coalesce_insert keeps entries disjoint AND sorted by offset, so a single
+     * forward walk yields the complement directly. */
+    for (uint8_t k = 0; k < p->hdr.number; k++) {
+        uint32_t seg_off = p->hdr.entries[k].offset;
+        if (seg_off > cursor) {
+            if (n >= max)
+                return n;
+            out[n].offset = cursor;
+            out[n].size   = seg_off - cursor;
+            n++;
+        }
+        cursor = seg_off + p->hdr.entries[k].size;
     }
 
-    /* Partial page: synchronous read-before-write. Read the current 256KB
-     * region from the SSD into an aligned scratch (so holes keep their on-disk
-     * contents), overlay our valid segments, then write the whole region back.
-     * This fuses OTflush Stage-1 (read holes) and Stage-2 (write) (docs/01 §4). */
+    if (cursor < NOX_DATAZONE_SIZE && n < max) {
+        out[n].offset = cursor;
+        out[n].size   = NOX_DATAZONE_SIZE - cursor;
+        n++;
+    }
+    return n;
+}
+
+int scrap_page_read_holes(uint64_t base, int fd, const scrap_entry_t *holes,
+                          uint32_t nh, void *scratch)
+{
+    uint8_t *dst = scratch;
+
+    for (uint32_t i = 0; i < nh; i++) {
+        /* O_DIRECT needs 4K-aligned offset AND length, but the hole itself is
+         * arbitrary. Widen the READ outward to block boundaries. The copy back
+         * (apply_holes) stays at exact hole width — widening the COPY would
+         * clobber the user's valid segments sitting just outside the hole. */
+        uint32_t h_off  = holes[i].offset;
+        uint32_t h_end  = h_off + holes[i].size;
+        uint32_t a_off  = h_off & ~(NOX_BLOCK_SIZE - 1);
+        uint32_t a_end  = (h_end + NOX_BLOCK_SIZE - 1) & ~(NOX_BLOCK_SIZE - 1);
+        if (a_end > NOX_DATAZONE_SIZE)
+            a_end = NOX_DATAZONE_SIZE;   /* zone size is a 4K multiple */
+        uint32_t a_len  = a_end - a_off;
+
+        /* Land the read at its own intra-page offset inside the scratch zone,
+         * so apply_holes can index scratch exactly like it indexes p->data.
+         *
+         * Zero first: a short read means the region is past EOF, and those
+         * bytes must read back as 0, not as stale scratch contents. This memset
+         * is load-bearing CORRECTNESS, not hygiene — the return value `r` is
+         * only checked for a hard error, so a short read is silently accepted
+         * and the zeroed tail is what makes that safe. */
+        memset(dst + a_off, 0, a_len);
+
+        ssize_t r = io_direct_pread(fd, dst + a_off, a_len,
+                                    (off_t)(base + a_off));
+        if (r < 0)                       /* short read is fine, hard error is not */
+            return -1;
+    }
+    return 0;
+}
+
+void scrap_page_apply_holes(scrap_page_t *p, const void *scratch)
+{
+    scrap_entry_t holes[NOX_MAX_ENTRIES + 1];
+    uint32_t nh = scrap_page_hole_ranges(p, holes, NOX_MAX_ENTRIES + 1);
+
+    /* Re-derived under the caller's lock: see the contract in scrap_page.h.
+     * Holes only shrink, so each of these is inside a range read_holes covered. */
+    for (uint32_t i = 0; i < nh; i++)
+        memcpy(p->data + holes[i].offset,
+               (const uint8_t *)scratch + holes[i].offset, holes[i].size);
+
+    /* COLLAPSE THE ENTRY ARRAY. Every byte of the zone is now valid — user data
+     * in the segments, disk data in the holes — so the page's true coverage is
+     * the single segment [0, 256KB). Recording that is not cosmetic:
+     *
+     *   1. scrap_page_is_full() tests `counter == NOX_DATAZONE_SIZE`. Leaving
+     *      the old fragmented entries makes it report FALSE on a page Stage-1
+     *      just completed, forcing every caller to second-guess it with a tag
+     *      check.
+     *   2. It frees 14 of the 15 entry slots. Without the collapse the page is
+     *      stuck at NOX_MAX_ENTRIES forever, so the very next scattered write to
+     *      this base overflows, seals the page and allocates another 256KB one.
+     *      That is a page-per-15-writes churn rate, and it is what drove RSS to
+     *      32 GB in five seconds on the first overlapping-base soak. */
+    p->hdr.entries[0].offset = 0;
+    p->hdr.entries[0].size   = NOX_DATAZONE_SIZE;
+    p->hdr.number            = 1;
+    p->hdr.counter           = NOX_DATAZONE_SIZE;
+}
+
+int scrap_page_fill_holes(scrap_page_t *p, int fd)
+{
+    scrap_entry_t holes[NOX_MAX_ENTRIES + 1];
+    uint32_t nh = scrap_page_hole_ranges(p, holes, NOX_MAX_ENTRIES + 1);
+    if (nh == 0)
+        return 0;                     /* full page: no Stage-1 read at all */
+
+    /* posix_memalign (not malloc) because this buffer is a direct O_DIRECT
+     * pread target (CLAUDE.md §2). */
     void *scratch = NULL;
     if (posix_memalign(&scratch, NOX_BLOCK_SIZE, NOX_DATAZONE_SIZE) != 0)
         return -1;
-    memset(scratch, 0, NOX_DATAZONE_SIZE); /* default for region past EOF */
 
-    ssize_t r = io_direct_pread(fd, scratch, NOX_DATAZONE_SIZE, (off_t)p->base);
-    if (r < 0) {
-        free(scratch);
-        return -1; /* short read (r >= 0) is fine; only a hard error aborts */
-    }
+    int rc = scrap_page_read_holes(p->base, fd, holes, nh, scratch);
+    if (rc == 0)
+        scrap_page_apply_holes(p, scratch);
 
-    /* Overlay valid segments on top of the on-disk image. */
-    for (uint8_t k = 0; k < p->hdr.number; k++) {
-        uint32_t off = p->hdr.entries[k].offset;
-        uint32_t sz  = p->hdr.entries[k].size;
-        memcpy((uint8_t *)scratch + off, p->data + off, sz);
-    }
-
-    ssize_t w = io_direct_pwrite(fd, scratch, NOX_DATAZONE_SIZE, (off_t)p->base);
     free(scratch);
-    p->hdr.tag = NOX_TAG_FULL;
+    return rc;
+}
+
+int scrap_page_writeback(scrap_page_t *p, int fd)
+{
+    /* _all, not the bare pwrite: a partial write must be resumed, not silently
+     * accepted as a success (Step 4b). Same policy as the Stage-2 batch. */
+    ssize_t w = io_direct_pwrite_all(fd, p->data, NOX_DATAZONE_SIZE,
+                                     (off_t)p->base);
     return (w == (ssize_t)NOX_DATAZONE_SIZE) ? 0 : -1;
 }

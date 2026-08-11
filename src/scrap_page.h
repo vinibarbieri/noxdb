@@ -48,7 +48,21 @@ typedef struct scrap_page {
     uint8_t           *data;   /* posix_memalign(4096, 256KB) data zone */
     uint64_t           base;   /* 256KB-aligned file offset this page covers */
     pthread_mutex_t    lock;   /* per-page lock (docs/01 §5); trivial in MVP */
-    struct scrap_page *next;   /* hash-bucket chain link */
+    struct scrap_page *next;   /* hash-bucket chain link (page_index) */
+
+    /* --- OTflush (C4) ------------------------------------------------------
+     * These live OUTSIDE scrap_header_t on purpose: the header is pinned at
+     * exactly 128B by the _Static_assert below, and it is the thing written to
+     * disk-adjacent structures. Queue state is pure RAM bookkeeping.
+     *
+     * qnext is a single link because of the single-membership invariant (spec
+     * §4.4): a page is in AT MOST ONE queue at a time. Dual membership would be
+     * a use-after-free — Stage-2 frees the page while the other queue still
+     * holds the pointer. Both flags are written only under `lock`. */
+    struct scrap_page *qnext;    /* intrusive link, valid only while in_queue */
+    int                in_queue; /* 1 while sitting in Q1 or Q2 */
+    int                detached; /* 1 once removed from the page index */
+    int                ssd_id_seen; /* test-only: times this page was popped */
 } scrap_page_t;
 
 typedef enum {
@@ -75,13 +89,64 @@ scrap_status_t scrap_page_merge(scrap_page_t *p, const void *buf,
 int scrap_page_is_full(const scrap_page_t *p);
 
 /*
- * Flush the page to the SSD synchronously.
- *  - Full page  : pwrite the whole 256KB data zone (no read needed).
- *  - Partial page: read-before-write — pread the region, overlay valid segments,
- *    then pwrite the whole 256KB. This is the synchronous stand-in for the
- *    asynchronous OTflush Stage-1/Stage-2 split (docs/01 §4).
+ * Enumerate the page's HOLES — the complement of the valid segments within
+ * [0, 256KB). Writes at most `max` ranges into `out` and returns how many.
+ * A full page yields 0. An empty page yields 1 range covering the whole zone.
+ * `out` must have room for NOX_MAX_ENTRIES + 1 ranges (n segments => n+1 holes).
+ */
+uint32_t scrap_page_hole_ranges(const scrap_page_t *p, scrap_entry_t *out,
+                                uint32_t max);
+
+/*
+ * OTflush Stage-1, split in two halves. The split exists so that NO LOCK IS
+ * HELD ACROSS THE pread: a foreground thread that touches this page while
+ * Stage-1 is reading would otherwise block on the SSD, and it would do so while
+ * holding the index shard mutex (page_index_get_or_create takes p->lock before
+ * releasing the shard lock), stalling every other page in that shard too. That
+ * is precisely the millisecond spike C4-GATE G4 exists to catch.
+ *
+ * Usage from Stage-1:
+ *      lock(p); nh = scrap_page_hole_ranges(p, holes, ...); unlock(p);
+ *      scrap_page_read_holes(p->base, fd, holes, nh, scratch);   // no lock
+ *      lock(p); scrap_page_apply_holes(p, scratch); unlock(p);
+ *
+ * `scratch` is a 4096-aligned NOX_DATAZONE_SIZE buffer indexed by intra-page
+ * offset: read_holes deposits each (block-widened) hole read at its own offset,
+ * and apply_holes copies back only the bytes that are STILL holes.
+ *
+ * Re-deriving the hole list under the lock in apply_holes is what makes the
+ * unlocked read safe. Segments only ever grow (coalesce_insert never shrinks
+ * coverage), so the hole set only shrinks: every hole seen by apply_holes is a
+ * subset of one seen by hole_ranges, hence its bytes were definitely read. A
+ * foreground merge that landed mid-read therefore wins, instead of being
+ * clobbered by older disk contents.
+ */
+int  scrap_page_read_holes(uint64_t base, int fd, const scrap_entry_t *holes,
+                           uint32_t nh, void *scratch);
+void scrap_page_apply_holes(scrap_page_t *p, const void *scratch);
+
+/*
+ * Convenience wrapper: hole_ranges + read_holes + apply_holes in one call, with
+ * its own scratch allocation. Single-threaded callers and tests only — Stage-1
+ * must use the split form above so it does not hold p->lock across the pread.
+ *
+ * A hole means "the user did not write here", so the bytes on disk must survive
+ * the writeback. Without this, Stage-2 would write zeros over valid data
+ * (docs/00_flow_summary.md:79). A FULL page has no holes and returns
+ * immediately without issuing a single pread — the read/write asymmetry win
+ * (docs/03 §3).
  * Returns 0 on success, -1 on I/O error.
  */
-int scrap_page_flush(scrap_page_t *p, int fd);
+int scrap_page_fill_holes(scrap_page_t *p, int fd);
+
+/*
+ * OTflush Stage-2: pwrite the whole 256KB data zone at p->base.
+ * Alignment holds by construction: base is a multiple of 256KB (=> of 4096),
+ * length is 256KB, and the data zone came from posix_memalign.
+ * PRECONDITION: scrap_page_fill_holes() has succeeded on this page, or the page
+ * is full. Writing a page with unfilled holes CORRUPTS the file.
+ * Returns 0 on success, -1 on I/O error.
+ */
+int scrap_page_writeback(scrap_page_t *p, int fd);
 
 #endif /* SCRAP_PAGE_H */

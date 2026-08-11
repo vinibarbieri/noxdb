@@ -1,9 +1,10 @@
 /*
  * noxdb.c - Engine lifecycle and the write_data router (docs/01 §3).
  *
- * MVP: the scrap path is synchronous (a full page is flushed inline, a partial
- * page is flushed at shutdown via read-before-write). Background OTflush threads
- * and real lock contention handling are deferred to a later phase.
+ * C4: the scrap path is fully asynchronous. The foreground copies into a
+ * page's data zone, updates the header entries, and hands a POINTER to
+ * OTflush's queues — it never issues a pread/pwrite itself. Both background
+ * stages (hole-fill, writeback) run on OTflush's own threads (otflush.c).
  */
 #define _GNU_SOURCE
 #include "noxdb.h"
@@ -11,6 +12,7 @@
 #include "io_direct.h"
 #include "page_index.h"
 #include "scrap_page.h"
+#include "otflush.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -18,7 +20,8 @@
 
 struct nox_engine {
     int           fd;
-    page_index_t *idx; // hash: page-base -> resident scrap page
+    page_index_t *idx;      /* hash: page-base -> resident scrap page */
+    otflush_t    *ot;       /* background two-stage flusher (C4) */
     uint16_t      ssd_id;   /* single SSD in the MVP */
 };
 
@@ -42,67 +45,78 @@ nox_engine_t *nox_open(const char *path)
     }
 
     e->ssd_id = 0;
+
+    /* Start the flush threads LAST: they reference e->idx and e->fd. */
+    e->ot = otflush_start(e->idx, e->fd);
+    if (!e->ot) {
+        page_index_destroy(e->idx);
+        close(e->fd);
+        free(e);
+        return NULL;
+    }
     return e;
 }
 
 /*
  * Route one chunk that lies entirely within a single 256KB page into the scrap
- * buffer. Handles the entry-overflow case by flushing the current page and
- * starting a fresh one (an MVP simplification of OTflush eviction).
- * Returns 0 on success, -1 on I/O error.
+ * buffer. NO DISK I/O HAPPENS HERE — pages are handed to OTflush, which flushes
+ * them on background threads (docs/01 §4). Returns 0 on success, -1 on error.
  */
 static int scrap_write_chunk(nox_engine_t *e, uint64_t base, uint32_t intra,
                              const void *buf, uint32_t len)
 {
-    int created;
-    scrap_page_t *p = page_index_get_or_create(e->idx, base, e->ssd_id, &created);
-    if (!p) {
-        errno = ENOMEM;
-        return -1;
-    }
-
-    /* LOCK ORDER (docs/01 §5): the index shard lock is released INSIDE
-     * page_index_get_or_create before we take the per-page lock here, so the two
-     * lock classes are never held at once -> no lock-order inversion.
-     * GET-THEN-LOCK WINDOW: between the call above returning `p` and this lock,
-     * another thread could remove+free the same page. The C3 gate writes DISJOINT
-     * offsets (each base owned by one thread) so it cannot fire; the general fix
-     * is the C5 tag=FLUSHING pointer-swap.
-     * Note: the OVERFLOW and full-page paths below also call scrap_page_flush()
-     * and page_index_remove() with p->lock released, so this "disjoint bases
-     * only" precondition applies to the entire function, not just this lock. */
-    pthread_mutex_lock(&p->lock);
-    scrap_status_t st = scrap_page_merge(p, buf, intra, len);
-
-    if (st == SCRAP_OVERFLOW) {
-        /* No room for another disjoint segment in the 15-entry header. Flush the
-         * page out, drop it, and re-create an empty page for this chunk. The
-         * retry merges a single segment and therefore cannot overflow. */
-        pthread_mutex_unlock(&p->lock);
-        if (scrap_page_flush(p, e->fd) != 0)
-            return -1;
-        page_index_remove(e->idx, base);
-
-        p = page_index_get_or_create(e->idx, base, e->ssd_id, &created);
+    for (;;) {
+        int created;
+        /* Lock coupling in the index closes the old get-then-lock window (C3
+         * debt); see the contract block in page_index.h. Returns p->lock HELD. */
+        scrap_page_t *p = page_index_get_or_create(e->idx, base, e->ssd_id,
+                                                   &created);
         if (!p) {
             errno = ENOMEM;
             return -1;
         }
-        pthread_mutex_lock(&p->lock);
-        (void)scrap_page_merge(p, buf, intra, len); /* fits: single segment */
-    }
 
-    int full = scrap_page_is_full(p);
-    pthread_mutex_unlock(&p->lock);
+        /* A SEALED page has exhausted its 15 header entries and is on its way
+         * out; it accepts no more merges. Detach it so the next lookup builds a
+         * fresh page, and retry. It is already queued, so it drains on its own. */
+        if (p->hdr.tag == NOX_TAG_SEALED) {
+            pthread_mutex_unlock(&p->lock);
+            page_index_detach_if(e->idx, base, p);
+            continue;
+        }
 
-    /* A fully-assembled 256KB page goes straight to the SSD and is reclaimed.
-     * (In the bg phase this enqueues to OTflush Stage-2 instead of flushing.) */
-    if (full) {
-        if (scrap_page_flush(p, e->fd) != 0)
-            return -1;
-        page_index_remove(e->idx, base);
+        scrap_status_t st = scrap_page_merge(p, buf, intra, len);
+
+        if (st == SCRAP_OVERFLOW) {
+            /* No room for another disjoint segment in the 15-entry header.
+             * Seal it, detach it, and retry on a fresh page. The retry merges a
+             * single segment and therefore cannot overflow.
+             * We do NOT flush inline here — that was the C2/C3 stand-in and is
+             * exactly the SSD stall C4 exists to remove. The page is already in
+             * a queue (it was enqueued when created), so OTflush drains it. */
+            p->hdr.tag = NOX_TAG_SEALED;
+            otflush_enqueue_partial(e->ot, p);  /* no-op if already queued */
+            pthread_mutex_unlock(&p->lock);
+            page_index_detach_if(e->idx, base, p);
+            continue;
+        }
+
+        if (scrap_page_is_full(p)) {
+            /* Fully assembled: straight to Q2, skipping Stage-1 entirely. No
+             * holes means no read-before-write at all — the asymmetry win
+             * (docs/03 §3). */
+            otflush_enqueue_full(e->ot, p);
+        } else if (created) {
+            /* Paper §3.4: "whenever an unfilled page is generated, the scrap
+             * buffer inserts it to Queue-1" — IMMEDIATELY, not at a watermark.
+             * It stays in the index and keeps absorbing writes while it waits;
+             * Stage-1 only fills whatever holes remain when it is popped. */
+            otflush_enqueue_partial(e->ot, p);
+        }
+
+        pthread_mutex_unlock(&p->lock);
+        return 0;
     }
-    return 0;
 }
 
 int nox_write(nox_engine_t *e, const void *buf, size_t size, uint64_t offset)
@@ -143,13 +157,16 @@ int nox_write(nox_engine_t *e, const void *buf, size_t size, uint64_t offset)
     return 0;
 }
 
-/* foreach callback: flush one remaining (partial) page at shutdown. */
-struct flush_ctx { int fd; int err; };
-static void flush_one(scrap_page_t *p, void *ctx)
+/* foreach callback: hand every still-resident page to OTflush at shutdown. */
+static void enqueue_one(scrap_page_t *p, void *ctx)
 {
-    struct flush_ctx *c = ctx;
-    if (scrap_page_flush(p, c->fd) != 0)
-        c->err = -1;
+    otflush_t *ot = ctx;
+    pthread_mutex_lock(&p->lock);
+    if (scrap_page_is_full(p))
+        otflush_enqueue_full(ot, p);
+    else
+        otflush_enqueue_partial(ot, p);
+    pthread_mutex_unlock(&p->lock);
 }
 
 int nox_close(nox_engine_t *e)
@@ -157,14 +174,31 @@ int nox_close(nox_engine_t *e)
     if (!e)
         return 0;
 
-    /* Every page still in the index is partial (full pages were flushed inline).
-     * Read-before-write flush them all, then tear everything down. */
-    struct flush_ctx c = { .fd = e->fd, .err = 0 };
-    page_index_foreach(e->idx, flush_one, &c);
+    /* CONTRACT: when nox_close returns 0, every byte the caller wrote has been
+     * issued to the SSD. bench/scrap_integrity_test.c's read-back memcmp relies
+     * on this. Note "issued via O_DIRECT", NOT "fsync'd" — nox_fsync is C6.
+     *
+     * ORDER MATTERS. page_index_foreach walks the bucket chains with NO locks
+     * (by design — see page_index.h), so it must not run while a Stage-2 thread
+     * is detaching pages and mutating those same chains. So:
+     *   1. drain: after this, pending == 0, both queues are empty, and no
+     *      background thread is touching the index.
+     *   2. sweep: hand over anything still resident (pages that were never
+     *      queued). All caller threads have finished by definition — a thread
+     *      cannot be inside nox_write and nox_close at once.
+     *   3. drain again, then stop and join. */
+    otflush_t *ot = e->ot;
 
+    int err = otflush_drain(ot);            /* 1 */
+    page_index_foreach(e->idx, enqueue_one, ot);  /* 2 */
+    if (otflush_stop(ot) != 0)              /* 3: drains, then joins */
+        err = -1;
+
+    /* Every page OTflush handled was detached and freed by Stage-2. Anything
+     * still in the index is a page it never saw; destroy() frees those. */
     page_index_destroy(e->idx);
     if (close(e->fd) != 0)
-        c.err = -1;
+        err = -1;
     free(e);
-    return c.err;
+    return err;
 }

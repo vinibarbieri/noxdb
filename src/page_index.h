@@ -7,21 +7,25 @@
  * unchanged. (Index structure not specified by docs; chosen for the MVP because
  * it is sparse and tolerates large/random offsets.)
  *
- * THREAD-SAFETY CONTRACT (READ BEFORE CALLING — MVP limitation, lifted in C5)
+ * THREAD-SAFETY CONTRACT (READ BEFORE CALLING)
  * -------------------------------------------------------------------------
- * The shard locks protect the BUCKET LISTS ONLY. They do NOT keep a returned
- * page alive: page_index_get_or_create() releases the shard lock before it
- * returns, and page_index_remove() frees its victim. There is no refcount and
- * no hazard pointer, so a scrap_page_t * handed out by get_or_create is only
- * valid while no other thread can remove that same base.
+ * LOCK ORDER, GLOBALLY: shard lock -> page lock. No path takes them in the
+ * other order, so there is no inversion.
  *
- * CALLER PRECONDITION: concurrent callers MUST operate on DISJOINT bases —
- * every 256KB page base is owned by at most one thread at a time. Violate this
- * and you get a use-after-free (and a pthread_mutex_destroy() on a lock another
- * thread is about to acquire), NOT merely a lost update.
+ * page_index_get_or_create() returns with the page's OWN lock already HELD. It
+ * acquires that lock before releasing the shard lock (lock coupling), which is
+ * what makes the returned pointer safe: a concurrent detach cannot slip in
+ * between the lookup and the caller's first use. The caller MUST unlock.
  *
- * The general fix is the C5 tag=FLUSHING pointer-swap, which makes eviction
- * publish a new page instead of freeing the old one under a live reader.
+ * This closes the C3-era "get-then-lock" window, where the shard lock was
+ * dropped before the caller could take the page lock and a concurrent
+ * page_index_remove() could free the page underneath it.
+ *
+ * REMAINING LIMITATION (lifted in C5): two threads writing the SAME 256KB base
+ * concurrently can still LOSE AN UPDATE — the page may be detached and flushed
+ * between one thread's write and another's. That is a correctness limit on
+ * write ordering, no longer a use-after-free. The C5 tag=FLUSHING pointer swap
+ * is the general fix.
  */
 #ifndef PAGE_INDEX_H
 #define PAGE_INDEX_H
@@ -40,9 +44,7 @@ void page_index_destroy(page_index_t *idx);
  * first touch. If `created` is non-NULL it is set to 1 when a new page was made,
  * 0 when an existing one was returned. Returns NULL on OOM.
  *
- * The returned pointer is UNOWNED: the shard lock is already released on return,
- * so the page stays valid only under the disjoint-base precondition documented
- * at the top of this header. Do not cache it across a possible eviction.
+ * RETURNS WITH p->lock HELD. The caller must pthread_mutex_unlock(&p->lock).
  */
 scrap_page_t *page_index_get_or_create(page_index_t *idx, uint64_t base,
                                        uint16_t ssd_id, int *created);
@@ -53,6 +55,18 @@ scrap_page_t *page_index_get_or_create(page_index_t *idx, uint64_t base,
  * dangling (see the disjoint-base precondition at the top of this header).
  */
 void page_index_remove(page_index_t *idx, uint64_t base);
+
+/*
+ * Unlink the page covering `base` ONLY IF the index still maps that base to
+ * `expect`. Does NOT free — ownership transfers to the caller, which is OTflush
+ * Stage-2 (spec §4.2). Returns 1 if unlinked, 0 if the base was absent or now
+ * maps to a different page.
+ *
+ * The identity check matters: between Stage-2 popping a page and reaching this
+ * call, the foreground may have detached the old page and installed a fresh one
+ * for the same base. Detaching by base alone would remove the wrong page.
+ */
+int page_index_detach_if(page_index_t *idx, uint64_t base, scrap_page_t *expect);
 
 /* Visit every live page (used by shutdown to flush all partials).
  * NOT thread-safe by design: takes no locks and assumes all writer threads have

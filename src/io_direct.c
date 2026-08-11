@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 /* Loud, unmissable diagnostic when the kernel rejects an unaligned O_DIRECT op.
@@ -78,4 +79,111 @@ ssize_t io_direct_pread(int fd, void *buf, size_t len, off_t off)
             report_einval("pread", off, len, buf);
     }
     return n; /* short read (past EOF) is fine and handled by the caller */
+}
+
+/*
+ * Consecutive calls making ZERO iovec-level progress tolerated before declaring
+ * the write dead. Without a bound this is an infinite loop: a writer stuck
+ * returning the same short count gets the identical call reissued forever, the
+ * single Stage-2 thread never serves another page, and nox_close() hangs.
+ * EINTR spends the same budget — both mean "that call advanced nothing".
+ */
+#define NOX_IO_MAX_STALL 4
+
+/* Pure: how many leading iovecs `n` bytes cover fully. *bytes_done receives the
+ * sum of their lengths (what the file offset advances by). Any remainder of `n`
+ * inside the next iovec is deliberately ignored — those bytes get rewritten.
+ * Never modifies the array; that is the whole trick. */
+static int iov_complete_count(const struct iovec *iov, int iovcnt,
+                              size_t n, size_t *bytes_done)
+{
+    size_t done = 0;
+    int    k    = 0;
+
+    while (k < iovcnt && n >= iov[k].iov_len) {
+        n    -= iov[k].iov_len;
+        done += iov[k].iov_len;
+        k++;
+    }
+    *bytes_done = done;
+    return k;
+}
+
+ssize_t io_direct_pwritev_all(int fd, struct iovec *iov, int iovcnt, off_t off)
+{
+    size_t total = 0;
+    for (int i = 0; i < iovcnt; i++)
+        total += iov[i].iov_len;
+
+    int   i       = 0;        /* first iovec not yet fully written */
+    off_t cur_off = off;      /* file offset matching iov[i]'s start */
+    int   stall   = NOX_IO_MAX_STALL;
+
+    while (i < iovcnt) {
+        /* pwritev, never writev+lseek: background threads share the fd
+         * (docs/02 §2). */
+        ssize_t w = pwritev(fd, &iov[i], iovcnt - i, cur_off);
+
+        if (w < 0) {
+            if (errno == EINTR) {
+                if (--stall < 0) { errno = EINTR; return -1; }
+                continue;
+            }
+            if (errno == EINVAL)
+                report_einval("pwritev", cur_off, total, iov[i].iov_base);
+            return -1;
+        }
+
+        if (w == 0) {
+            /* No error, no bytes: nothing to resume from, no reason to expect a
+             * different result next time. Fatal. */
+            fprintf(stderr, "io_direct_pwritev_all: 0 bytes, no error, at %lld\n",
+                    (long long)cur_off);
+            errno = EIO;
+            return -1;
+        }
+
+        if (w % NOX_BLOCK_SIZE)
+            /* Not needed for correctness (we never do arithmetic with it), but
+             * under O_DIRECT it means the write was cut mid-block — ENOSPC or a
+             * signal. Silencing it would be as bad as silencing EINVAL. */
+            fprintf(stderr,
+                    "io_direct_pwritev_all: WARNING short write of %zd is not a "
+                    "multiple of %u at offset %lld\n",
+                    w, NOX_BLOCK_SIZE, (long long)cur_off);
+
+        size_t done = 0;
+        int    k = iov_complete_count(&iov[i], iovcnt - i, (size_t)w, &done);
+
+        if (k == 0) {
+            /* Not even the first iovec completed: the next call would be
+             * byte-for-byte identical. Bound it or spin forever. */
+            if (--stall < 0) {
+                fprintf(stderr,
+                        "io_direct_pwritev_all: no iovec completed after %d "
+                        "attempts at offset %lld\n",
+                        NOX_IO_MAX_STALL + 1, (long long)cur_off);
+                errno = EIO;
+                return -1;
+            }
+            continue;
+        }
+
+        stall    = NOX_IO_MAX_STALL;   /* real progress: refill the budget */
+        i       += k;
+        cur_off += (off_t)done;
+        /* (w - done) bytes landed inside iov[i] and are discarded; the next call
+         * rewrites them. Idempotent — see the precondition above. */
+    }
+
+    return (ssize_t)total;
+}
+
+/* Single-buffer case expressed as a 1-iovec gather, so there is exactly ONE
+ * short-write policy in the engine. Keeps the bounce-buffer handling of
+ * io_direct_pwrite for unaligned callers. */
+ssize_t io_direct_pwrite_all(int fd, const void *buf, size_t len, off_t off)
+{
+    struct iovec iov = { .iov_base = (void *)(uintptr_t)buf, .iov_len = len };
+    return io_direct_pwritev_all(fd, &iov, 1, off);
 }
