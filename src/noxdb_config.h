@@ -17,16 +17,28 @@
  * straight to the SSD via O_DIRECT (the "fast path"). (docs/01 §1, §3) */
 #define NOX_DIRECT_THRESHOLD (1u * 1024u * 1024u)   /* 1 MB */
 
-/* Scrap-page header is exactly 128 bytes. (docs/01 §1, §2) */
-#define NOX_HEADER_SIZE      128u
+/* Scrap-page header size. DERIVED from the entry count below, never hardcoded:
+ * the two used to be independent literals (128 and 15) and were free to drift
+ * apart. The 8 non-entry bytes are WSBuffer's own field list — 4B counter +
+ * 2B ssd_id + 1B number + 1B tag — which pack with no padding (scrap_page.h
+ * enforces it). 128B at the default 15 entries. (docs/01 §1, §2) */
+#define NOX_HEADER_SIZE      (8u + NOX_MAX_ENTRIES * 8u)
 
 /* Scrap-page data zone is exactly 256 KB. Allocated SEPARATELY from the header
  * via posix_memalign(..., 4096, ...) so its address satisfies O_DIRECT.
  * (docs/01 §1, §2 CRITICAL) */
 #define NOX_DATAZONE_SIZE    (256u * 1024u)         /* 262144 */
 
-/* The header carries an array of exactly 15 index entries (8B each). (docs/01 §2) */
+/* Index entries in the header, 8B each (docs/01 §2). WSBuffer's default is 15.
+ *
+ * 255 IS A HARD CEILING and it is the paper's, not ours: `hdr.number` is one
+ * byte (scrap_page.h asserts the range). Overridable from the build so the
+ * value can be swept without a source edit:  make gate-c4 NOX_ENTRIES=64 */
+#ifdef NOX_MAX_ENTRIES_OVERRIDE
+#define NOX_MAX_ENTRIES      ((uint32_t)(NOX_MAX_ENTRIES_OVERRIDE))
+#else
 #define NOX_MAX_ENTRIES      15u
+#endif
 
 /* Page-index shard count: the index's bucket lists are partitioned across this
  * many independent mutexes so concurrent writers on different pages don't

@@ -37,7 +37,13 @@ typedef struct {
 } scrap_header_t;                          /* total = 128B */
 
 _Static_assert(sizeof(scrap_header_t) == NOX_HEADER_SIZE,
-               "scrap_header_t must be exactly 128 bytes (docs/01 §1)");
+               "scrap_header_t must be exactly 8B of scalars + NOX_MAX_ENTRIES*8B "
+               "with no padding (docs/01 §1; 128B at the default 15 entries)");
+
+/* The ceiling is WSBuffer's, not ours: `number` is one byte, so a page can hold
+ * at most 255 data-segments. Past this the paper's header layout changes. */
+_Static_assert(NOX_MAX_ENTRIES >= 1 && NOX_MAX_ENTRIES <= 255,
+               "NOX_MAX_ENTRIES must fit in the 1-byte hdr.number field");
 
 /*
  * A live scrap page. `data` is a SEPARATE 4K-aligned 256KB allocation, never

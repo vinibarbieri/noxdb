@@ -90,10 +90,16 @@ static scrap_status_t coalesce_insert(scrap_header_t *h, uint32_t off, uint32_t 
     uint32_t new_off = off;
     uint32_t new_end = off + len;           /* segments never exceed 256KB */
 
-    /* Build the new entry list in a scratch array (room for one extra). */
+    /* Build the new entry list in a scratch array (room for one extra).
+     *
+     * Counters are uint32_t, NOT uint8_t. NOX_MAX_ENTRIES is tunable up to 255
+     * (the width of hdr.number), and at 255 a uint8_t counter is a live bug: the
+     * guard `n >= NOX_MAX_ENTRIES + 1` compares against 256, which a uint8_t can
+     * never reach, so instead of returning SCRAP_OVERFLOW the index wraps to 0
+     * and the loop runs forever. Same for `i` against h->number. */
     scrap_entry_t out[NOX_MAX_ENTRIES + 1];
-    uint8_t n = 0;
-    uint8_t i = 0;
+    uint32_t n = 0;
+    uint32_t i = 0;
 
     /* (1) Copy through segments that end strictly before the new one and are
      *     not adjacent (end < new_off). They cannot merge. */
@@ -130,11 +136,11 @@ static scrap_status_t coalesce_insert(scrap_header_t *h, uint32_t off, uint32_t 
 
     /* Commit: copy scratch back and recompute counter (sum of disjoint sizes). */
     uint32_t total = 0;
-    for (uint8_t k = 0; k < n; k++) {
+    for (uint32_t k = 0; k < n; k++) {
         h->entries[k] = out[k];
         total += out[k].size;
     }
-    h->number  = n;
+    h->number  = (uint8_t)n;   /* n <= NOX_MAX_ENTRIES <= 255, checked above */
     h->counter = total;
     return SCRAP_OK;
 }
@@ -162,7 +168,7 @@ uint32_t scrap_page_hole_ranges(const scrap_page_t *p, scrap_entry_t *out,
 
     /* coalesce_insert keeps entries disjoint AND sorted by offset, so a single
      * forward walk yields the complement directly. */
-    for (uint8_t k = 0; k < p->hdr.number; k++) {
+    for (uint32_t k = 0; k < p->hdr.number; k++) {
         uint32_t seg_off = p->hdr.entries[k].offset;
         if (seg_off > cursor) {
             if (n >= max)
