@@ -44,7 +44,15 @@ scrap_page_t *scrap_page_alloc(uint64_t base, uint16_t ssd_id)
      * faults only the handful of 4K pages it actually writes into, spread
      * across its writes; Stage-1's apply_holes faults the rest, on a background
      * thread. Moving work off the critical path is the entire premise of C4,
-     * so paying for the whole zone up front was working against the cycle. */
+     * so paying for the whole zone up front was working against the cycle.
+     *
+     * NOX_EAGER_ZERO restores the old behaviour. It exists ONLY to rebuild the
+     * "before" binary for the latency comparison (make gate-c4-zero), so the
+     * two CDF curves come from one source tree one #ifdef apart instead of from
+     * two checkouts. Never define it for a real build. */
+#ifdef NOX_EAGER_ZERO
+    memset(zone, 0, NOX_DATAZONE_SIZE);
+#endif
 
     memset(&p->hdr, 0, sizeof(p->hdr));
     p->hdr.ssd_id = ssd_id;
@@ -167,7 +175,9 @@ uint32_t scrap_page_hole_ranges(const scrap_page_t *p, scrap_entry_t *out,
     uint32_t cursor = 0;   /* first byte not yet accounted for */
 
     /* coalesce_insert keeps entries disjoint AND sorted by offset, so a single
-     * forward walk yields the complement directly. */
+     * forward walk yields the complement directly. `k` is uint32_t, not uint8_t:
+     * at NOX_MAX_ENTRIES == 255 a uint8_t k wraps to 0 after the last entry and
+     * this loop never terminates. */
     for (uint32_t k = 0; k < p->hdr.number; k++) {
         uint32_t seg_off = p->hdr.entries[k].offset;
         if (seg_off > cursor) {
@@ -189,9 +199,10 @@ uint32_t scrap_page_hole_ranges(const scrap_page_t *p, scrap_entry_t *out,
 }
 
 int scrap_page_read_holes(uint64_t base, int fd, const scrap_entry_t *holes,
-                          uint32_t nh, void *scratch)
+                          uint32_t nh, void *scratch, uint64_t *bytes_read)
 {
     uint8_t *dst = scratch;
+    uint64_t asked = 0;
 
     for (uint32_t i = 0; i < nh; i++) {
         /* O_DIRECT needs 4K-aligned offset AND length, but the hole itself is
@@ -220,7 +231,14 @@ int scrap_page_read_holes(uint64_t base, int fd, const scrap_entry_t *holes,
                                     (off_t)(base + a_off));
         if (r < 0)                       /* short read is fine, hard error is not */
             return -1;
+
+        /* What the DEVICE was asked for, not what the hole needed: the widening
+         * above is real traffic, and read amplification is measured against it. */
+        asked += a_len;
     }
+
+    if (bytes_read)
+        *bytes_read = asked;
     return 0;
 }
 
@@ -243,7 +261,7 @@ void scrap_page_apply_holes(scrap_page_t *p, const void *scratch)
      *      the old fragmented entries makes it report FALSE on a page Stage-1
      *      just completed, forcing every caller to second-guess it with a tag
      *      check.
-     *   2. It frees 14 of the 15 entry slots. Without the collapse the page is
+     *   2. It frees all but one of the entry slots. Without the collapse the page is
      *      stuck at NOX_MAX_ENTRIES forever, so the very next scattered write to
      *      this base overflows, seals the page and allocates another 256KB one.
      *      That is a page-per-15-writes churn rate, and it is what drove RSS to
@@ -267,7 +285,7 @@ int scrap_page_fill_holes(scrap_page_t *p, int fd)
     if (posix_memalign(&scratch, NOX_BLOCK_SIZE, NOX_DATAZONE_SIZE) != 0)
         return -1;
 
-    int rc = scrap_page_read_holes(p->base, fd, holes, nh, scratch);
+    int rc = scrap_page_read_holes(p->base, fd, holes, nh, scratch, NULL);
     if (rc == 0)
         scrap_page_apply_holes(p, scratch);
 

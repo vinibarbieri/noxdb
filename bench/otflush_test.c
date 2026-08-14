@@ -32,6 +32,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>          /* pow(): log-spaced quantile grid for the CSV dump */
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -190,6 +191,38 @@ int main(int argc, char **argv)
     uint64_t p99   = all[(size_t)(nall * 0.99)];
     uint64_t p999  = all[(size_t)(nall * 0.999)];
     uint64_t pmax  = all[nall - 1];
+
+    /* Optional CDF dump for the write-up. `all` is already sorted, so the
+     * empirical CDF is just an index walk; four printed quantiles cannot draw
+     * one. Off unless NOX_LAT_CSV names a file, so the gate's own output and
+     * timing are untouched when it is not set.
+     *
+     * The sampling is log-spaced in the SURVIVAL function (1-q) rather than
+     * uniform in q: the whole claim of C4 is about the far tail, and a uniform
+     * grid spends 99% of its points on the flat part of the curve and lands
+     * exactly one sample past p99. This gives equal resolution per decade out
+     * to p99.999, then appends the true max. */
+    const char *csv_path = getenv("NOX_LAT_CSV");
+    if (csv_path) {
+        FILE *csv = fopen(csv_path, "w");
+        if (!csv) {
+            perror("fopen NOX_LAT_CSV");
+        } else {
+            fprintf(csv, "q,ns\n");
+            const int PTS = 600;              /* points across 5 decades of tail */
+            for (int i = 0; i <= PTS; i++) {
+                /* 1-q sweeps 1e0 -> 1e-5, so q sweeps 0 -> 0.99999 */
+                double surv = pow(10.0, -5.0 * (double)i / (double)PTS);
+                double q    = 1.0 - surv;
+                size_t idx  = (size_t)(q * (double)nall);
+                if (idx >= nall) idx = nall - 1;
+                fprintf(csv, "%.6f,%llu\n", q, (unsigned long long)all[idx]);
+            }
+            fprintf(csv, "1.000000,%llu\n", (unsigned long long)pmax);
+            fclose(csv);
+            fprintf(stderr, "latency CDF (%zu samples) -> %s\n", nall, csv_path);
+        }
+    }
 
     printf("writes:       %zu across %d threads in %.3f s\n",
            nall, nthreads, t_writes / 1e9);

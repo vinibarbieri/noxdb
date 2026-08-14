@@ -6,6 +6,7 @@
 #include "queue.h"
 #include "io_direct.h"
 #include "noxdb_config.h"
+#include "nox_stats.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -51,7 +52,7 @@ struct otflush {
  *
  * The hazard it closes (found by C2-GATE region 5, single-threaded):
  *
- *   A page whose 15-entry array fills up is SEALED and DETACHED from the index,
+ *   A page whose entry array fills up is SEALED and DETACHED from the index,
  *   and the foreground immediately creates a fresh page P2 for the SAME base.
  *   Now two live pages cover one disk region. P1 is ahead of P2 in the FIFO, so
  *   Stage-2 writes P1 first and P2 last. But Stage-1 fills P2's holes by
@@ -275,6 +276,12 @@ static void *stage1_loop(void *arg)
         scrap_entry_t holes[NOX_MAX_ENTRIES + 1];
         uint32_t nh = scrap_page_hole_ranges(p, holes, NOX_MAX_ENTRIES + 1);
         uint64_t base = p->base;           /* immutable after alloc */
+        /* Sampled here, under the lock, BEFORE apply_holes collapses the entry
+         * array to a single segment. This is the instant the page stops being
+         * something the foreground fills and becomes something the background
+         * assembles — one sample per page, and the population is exactly the
+         * partial pages the header size governs. */
+        nox_stat_entries_at_stage1(p->hdr.number);
         pthread_mutex_unlock(&p->lock);
 
         /* ORDERING: never read a region that still has a page pending
@@ -282,9 +289,11 @@ static void *stage1_loop(void *arg)
          * older page is about to overwrite. See wb_guard_* above. */
         wb_guard_wait(o, base);
 
+        uint64_t rbytes = 0;
         bcount_add(o, NOX_DATAZONE_SIZE);
-        int rc = scrap_page_read_holes(base, o->fd, holes, nh, scratch);
+        int rc = scrap_page_read_holes(base, o->fd, holes, nh, scratch, &rbytes);
         bcount_sub(o, NOX_DATAZONE_SIZE);
+        nox_stat_disk_read(rbytes);
 
         pthread_mutex_lock(&p->lock);
         if (rc != 0) {
@@ -397,6 +406,7 @@ static void *stage2_loop(void *arg)
             bcount_add(o, NOX_DATAZONE_SIZE);
             rc = scrap_page_writeback(batch[0], o->fd);
             bcount_sub(o, NOX_DATAZONE_SIZE);
+            nox_stat_disk_write(NOX_DATAZONE_SIZE);
         } else {
             /* Scatter-gather: n data zones in RAM -> ONE syscall covering a
              * contiguous n*256KB disk region (docs/00_flow_summary.md:87).
@@ -420,6 +430,7 @@ static void *stage2_loop(void *arg)
             ssize_t w = io_direct_pwritev_all(o->fd, iov, (int)n,
                                               (off_t)batch[0]->base);
             bcount_sub(o, total);
+            nox_stat_disk_write(total);
             rc = (w == (ssize_t)total) ? 0 : -1;
         }
 

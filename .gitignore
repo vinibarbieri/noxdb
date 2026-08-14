@@ -57,3 +57,6 @@ CLAUDE.md
 .claude
 # local-only design docs (superpowers specs/plans)
 docs/superpowers/
+
+# build-config stamp: forces object rebuild when NOX_ENTRIES changes (Makefile)
+.entries-stamp

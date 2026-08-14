@@ -13,8 +13,10 @@
 #include "page_index.h"
 #include "scrap_page.h"
 #include "otflush.h"
+#include "nox_stats.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -75,6 +77,8 @@ static int scrap_write_chunk(nox_engine_t *e, uint64_t base, uint32_t intra,
             errno = ENOMEM;
             return -1;
         }
+        if (created)
+            nox_stat_page_created();
 
         /* A SEALED page has exhausted its 15 header entries and is on its way
          * out; it accepts no more merges. Detach it so the next lookup builds a
@@ -88,12 +92,18 @@ static int scrap_write_chunk(nox_engine_t *e, uint64_t base, uint32_t intra,
         scrap_status_t st = scrap_page_merge(p, buf, intra, len);
 
         if (st == SCRAP_OVERFLOW) {
-            /* No room for another disjoint segment in the 15-entry header.
+            /* No room for another disjoint segment in the entry array.
              * Seal it, detach it, and retry on a fresh page. The retry merges a
              * single segment and therefore cannot overflow.
              * We do NOT flush inline here — that was the C2/C3 stand-in and is
              * exactly the SSD stall C4 exists to remove. The page is already in
              * a queue (it was enqueued when created), so OTflush drains it. */
+            /* The ONE place the header size controls an eviction: this page is
+             * leaving with however little data it holds, purely because the
+             * entry array ran out. WSBuffer reports this happening in under 5%
+             * of pages on its workloads (paper §3.2). Counting it is how we find
+             * out whether that holds here. */
+            nox_stat_seal_entries();
             p->hdr.tag = NOX_TAG_SEALED;
             otflush_enqueue_partial(e->ot, p);  /* no-op if already queued */
             pthread_mutex_unlock(&p->lock);
@@ -104,7 +114,9 @@ static int scrap_write_chunk(nox_engine_t *e, uint64_t base, uint32_t intra,
         if (scrap_page_is_full(p)) {
             /* Fully assembled: straight to Q2, skipping Stage-1 entirely. No
              * holes means no read-before-write at all — the asymmetry win
-             * (docs/03 §3). */
+             * (docs/03 §3). Eviction by CAPACITY, which the header size does not
+             * control — the design working as intended. */
+            nox_stat_page_full(p->hdr.number);
             otflush_enqueue_full(e->ot, p);
         } else if (created) {
             /* Paper §3.4: "whenever an unfilled page is generated, the scrap
@@ -135,7 +147,13 @@ int nox_write(nox_engine_t *e, const void *buf, size_t size, uint64_t offset)
     }
 
     /* Scrap path: small or unaligned. Split across 256KB page boundaries since a
-     * single user write may straddle two pages. */
+     * single user write may straddle two pages.
+     *
+     * Only scrap-path bytes are counted for amplification: the fast path above
+     * writes the user's buffer straight through at 1.00x by construction, so
+     * folding it in would dilute the number we are trying to measure. */
+    nox_stat_user_bytes(size);
+
     const uint8_t *src = (const uint8_t *)buf;
     uint64_t cur = offset;
     size_t remaining = size;
@@ -200,5 +218,9 @@ int nox_close(nox_engine_t *e)
     if (close(e->fd) != 0)
         err = -1;
     free(e);
+
+    /* After every background thread has joined, so the relaxed counters are
+     * stable without needing any ordering of their own. No-op unless -DNOX_STATS. */
+    nox_stats_dump(stderr);
     return err;
 }

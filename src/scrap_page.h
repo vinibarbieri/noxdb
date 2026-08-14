@@ -23,22 +23,24 @@ typedef struct {
 } scrap_entry_t;
 
 /*
- * The 128-byte header. Field ORDER is deliberate: placing the uint16_t ssd_id
- * right after the uint32_t counter (so it lands on an even, naturally-aligned
- * offset) lets the four scalar fields pack into exactly 8 bytes with NO padding.
- * 8B scalars + 15*8B entries = 128B. The static assert below enforces this.
+ * The header. Field ORDER is deliberate: placing the uint16_t ssd_id right
+ * after the uint32_t counter (so it lands on an even, naturally-aligned offset)
+ * lets the four scalar fields pack into exactly 8 bytes with NO padding, making
+ * the size 8B + NOX_MAX_ENTRIES*8B exactly. The static assert below enforces
+ * it. No literal size is written here on purpose: the entry count is tunable,
+ * so any number in a comment is a number free to drift. (docs/01 §2)
  */
 typedef struct {
     uint32_t      counter;                 /* off 0: total valid bytes in page */
     uint16_t      ssd_id;                  /* off 4: underlying SSD id */
     uint8_t       number;                  /* off 6: count of valid data-segments */
     uint8_t       tag;                     /* off 7: flush state (NOX_TAG_*) */
-    scrap_entry_t entries[NOX_MAX_ENTRIES];/* off 8: 15*8 = 120B */
-} scrap_header_t;                          /* total = 128B */
+    scrap_entry_t entries[NOX_MAX_ENTRIES];/* off 8: NOX_MAX_ENTRIES * 8B */
+} scrap_header_t;                          /* total = NOX_HEADER_SIZE */
 
 _Static_assert(sizeof(scrap_header_t) == NOX_HEADER_SIZE,
                "scrap_header_t must be exactly 8B of scalars + NOX_MAX_ENTRIES*8B "
-               "with no padding (docs/01 §1; 128B at the default 15 entries)");
+               "with no padding (docs/01 §1; 520B at this engine's 64 entries)");
 
 /* The ceiling is WSBuffer's, not ours: `number` is one byte, so a page can hold
  * at most 255 data-segments. Past this the paper's header layout changes. */
@@ -58,7 +60,7 @@ typedef struct scrap_page {
 
     /* --- OTflush (C4) ------------------------------------------------------
      * These live OUTSIDE scrap_header_t on purpose: the header is pinned at
-     * exactly 128B by the _Static_assert below, and it is the thing written to
+     * exactly NOX_HEADER_SIZE by the _Static_assert above, and it is written to
      * disk-adjacent structures. Queue state is pure RAM bookkeeping.
      *
      * qnext is a single link because of the single-membership invariant (spec
@@ -73,7 +75,7 @@ typedef struct scrap_page {
 
 typedef enum {
     SCRAP_OK = 0,
-    SCRAP_OVERFLOW = 1   /* merge would exceed the 15-entry limit */
+    SCRAP_OVERFLOW = 1   /* merge would exceed NOX_MAX_ENTRIES entries */
 } scrap_status_t;
 
 /* Allocate a zeroed page covering `base`. Returns NULL on OOM. */
@@ -126,9 +128,15 @@ uint32_t scrap_page_hole_ranges(const scrap_page_t *p, scrap_entry_t *out,
  * subset of one seen by hole_ranges, hence its bytes were definitely read. A
  * foreground merge that landed mid-read therefore wins, instead of being
  * clobbered by older disk contents.
+ *
+ * `bytes_read` (may be NULL) receives the total the reads actually asked the
+ * device for — the BLOCK-WIDENED total, not the sum of hole sizes, because
+ * widening to 4K boundaries is real traffic the SSD serves. It is reported here
+ * rather than recomputed by the caller so the widening arithmetic lives in
+ * exactly one place and the two can never drift apart.
  */
 int  scrap_page_read_holes(uint64_t base, int fd, const scrap_entry_t *holes,
-                           uint32_t nh, void *scratch);
+                           uint32_t nh, void *scratch, uint64_t *bytes_read);
 void scrap_page_apply_holes(scrap_page_t *p, const void *scratch);
 
 /*
