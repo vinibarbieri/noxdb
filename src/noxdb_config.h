@@ -17,11 +17,9 @@
  * straight to the SSD via O_DIRECT (the "fast path"). (docs/01 §1, §3) */
 #define NOX_DIRECT_THRESHOLD (1u * 1024u * 1024u)   /* 1 MB */
 
-/* Scrap-page header size. DERIVED from the entry count below, never hardcoded:
- * the two used to be independent literals (128 and 15) and were free to drift
- * apart. The 8 non-entry bytes are WSBuffer's own field list — 4B counter +
- * 2B ssd_id + 1B number + 1B tag — which pack with no padding (scrap_page.h
- * enforces it). 128B at the default 15 entries. (docs/01 §1, §2) */
+/* Scrap-page header size. DERIVED from the entry count below — see there. The
+ * 8 non-entry bytes are WSBuffer's own field list: 4B counter + 2B ssd_id +
+ * 1B number + 1B tag, which pack with no padding (scrap_page.h enforces it). */
 #define NOX_HEADER_SIZE      (8u + NOX_MAX_ENTRIES * 8u)
 
 /* Scrap-page data zone is exactly 256 KB. Allocated SEPARATELY from the header
@@ -29,15 +27,39 @@
  * (docs/01 §1, §2 CRITICAL) */
 #define NOX_DATAZONE_SIZE    (256u * 1024u)         /* 262144 */
 
-/* Index entries in the header, 8B each (docs/01 §2). WSBuffer's default is 15.
+/*
+ * Index entries in the header, 8B each. FULL RATIONALE IN docs/01 §2.1 — read
+ * it before changing this. Summary of what is recorded there:
  *
- * 255 IS A HARD CEILING and it is the paper's, not ours: `hdr.number` is one
- * byte (scrap_page.h asserts the range). Overridable from the build so the
- * value can be swept without a source edit:  make gate-c4 NOX_ENTRIES=64 */
+ * 15 IS WSBUFFER'S DEFAULT, NOT AN INVARIANT. The paper says so directly ("the
+ * header is 128B-sized BY DEFAULT") and points at a larger header for
+ * small-write workloads. Raising this uses the knob they document.
+ *
+ * WHY 64. A page is evicted either because its 256KB filled (capacity, as
+ * designed) or because this array ran out (fragmentation). The crossover is
+ * exactly NOX_DATAZONE_SIZE / NOX_MAX_ENTRIES. 64 is not fitted to a benchmark:
+ * NOX_DATAZONE_SIZE / NOX_BLOCK_SIZE == 64, so 64 segments of 4096B put counter
+ * at exactly 262144 — the entry array CANNOT bind before capacity for any
+ * segment >= 4KB, which is the device's own addressing granularity. Below 4KB
+ * amplification is physics, and absorbing it is what the scrap buffer is for.
+ *
+ * Measured, C4 gate, 8 threads (docs/01 §2.1 has the full sweep): 15 entries
+ * sealed 96.27% of pages by exhaustion at 58.53x write amplification; 64 cut
+ * drain 5.105s -> 1.811s and foreground p99 58835ns -> 27792ns. Cost is 392B
+ * per page (0.15%), and fragmented workloads use LESS total RAM because ~4.5x
+ * fewer pages exist.
+ *
+ * 255 IS A HARD CEILING and it is the paper's, not ours: the `number` field is
+ * one byte (scrap_page.h). Going past it changes WSBuffer's header layout.
+ *
+ * Overridable from the build so a sweep needs no source edit. Applies to every
+ * target including the gates; objects rebuild automatically when it changes:
+ *      make gate-c4 NOX_ENTRIES=255
+ */
 #ifdef NOX_MAX_ENTRIES_OVERRIDE
 #define NOX_MAX_ENTRIES      ((uint32_t)(NOX_MAX_ENTRIES_OVERRIDE))
 #else
-#define NOX_MAX_ENTRIES      15u
+#define NOX_MAX_ENTRIES      64u
 #endif
 
 /* Page-index shard count: the index's bucket lists are partitioned across this
@@ -121,7 +143,7 @@
 #define NOX_WB_GUARD_SLOTS   (1u << NOX_WB_GUARD_BITS)
 
 /* Additional scrap_header_t.tag states (see NOX_TAG_OPEN / NOX_TAG_FULL). */
-#define NOX_TAG_SEALED       2u   /* 15 entries used: no more merges accepted */
+#define NOX_TAG_SEALED       2u   /* entry array exhausted: no more merges */
 #define NOX_TAG_FLUSHING     3u   /* Stage-2 owns it; detached from the index */
 
 #endif /* NOXDB_CONFIG_H */
