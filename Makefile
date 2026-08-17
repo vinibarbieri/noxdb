@@ -16,6 +16,15 @@ NOX_ENTRIES ?=
 ENTRY_FLAGS := $(if $(NOX_ENTRIES),-DNOX_MAX_ENTRIES_OVERRIDE=$(NOX_ENTRIES))
 CFLAGS += $(ENTRY_FLAGS)
 
+# Soak-only knob (SHARED_BASES, bench/otflush_soak.c). Varies the OVERLAP RATIO,
+# not a tuning dial: 4 is the board's case. Bases actually used is
+# min(SOAK_THREADS, SOAK_BASES), so raising this above the thread count changes
+# NOTHING -- lower it instead to pack more threads onto each base.
+#   make soak-c4 SOAK_BASES=2 SOAK_SECONDS=60 SOAK_THREADS=16   # 8 threads/base
+SOAK_BASES ?=
+SOAK_FLAGS := $(if $(SOAK_BASES),-DSHARED_BASES=$(SOAK_BASES)u)
+CFLAGS += $(SOAK_FLAGS)
+
 SRC   := $(wildcard src/*.c)
 OBJ   := $(SRC:.c=.o)
 BENCH := bench/benchmark
@@ -35,10 +44,12 @@ $(BENCH): $(OBJ) bench/benchmark.o
 
 # Object files bake the header size in, and make cannot see that a -D changed:
 # `make gate-c4 NOX_ENTRIES=64` would relink 15-entry objects and print a
-# "64-entry" result that is nothing of the sort. This stamp records the current
-# value and forces a rebuild whenever it moves.
+# "64-entry" result that is nothing of the sort. This stamp records EVERY -D
+# knob's current value and forces a rebuild whenever any of them moves. Add new
+# knobs here too, or they inherit exactly the bug this exists to prevent.
 .entries-stamp: FORCE
-	@echo '$(NOX_ENTRIES)' | cmp -s - $@ 2>/dev/null || echo '$(NOX_ENTRIES)' > $@
+	@echo '$(NOX_ENTRIES) $(SOAK_BASES)' | cmp -s - $@ 2>/dev/null || \
+	    echo '$(NOX_ENTRIES) $(SOAK_BASES)' > $@
 FORCE:
 
 %.o: %.c .entries-stamp
