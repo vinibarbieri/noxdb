@@ -198,11 +198,40 @@ uint32_t scrap_page_hole_ranges(const scrap_page_t *p, scrap_entry_t *out,
     return n;
 }
 
+/*
+ * Issue ONE device read for the block-aligned range [off, end) of the zone.
+ *
+ * The read lands at its own intra-page offset inside the scratch zone, so
+ * apply_holes can index scratch exactly like it indexes p->data.
+ *
+ * Zero first: a short read means the region is past EOF, and those bytes must
+ * read back as 0, not as stale scratch contents. This memset is load-bearing
+ * CORRECTNESS, not hygiene — the return value `r` is only checked for a hard
+ * error, so a short read is silently accepted and the zeroed tail is what makes
+ * that safe.
+ */
+static int read_run(uint64_t base, int fd, uint8_t *dst,
+                    uint32_t off, uint32_t end)
+{
+    uint32_t len = end - off;
+
+    memset(dst + off, 0, len);
+
+    /* pread, never read+lseek: Stage-1 shares the fd with every foreground
+     * thread, so a global file offset would be a race (CLAUDE.md §2). */
+    ssize_t r = io_direct_pread(fd, dst + off, len, (off_t)(base + off));
+    return (r < 0) ? -1 : 0;   /* short read is fine, hard error is not */
+}
+
 int scrap_page_read_holes(uint64_t base, int fd, const scrap_entry_t *holes,
                           uint32_t nh, void *scratch, uint64_t *bytes_read)
 {
     uint8_t *dst = scratch;
     uint64_t asked = 0;
+
+    /* The open run of block-aligned bytes not yet issued to the device. */
+    uint32_t run_off = 0, run_end = 0;
+    int have_run = 0;
 
     for (uint32_t i = 0; i < nh; i++) {
         /* O_DIRECT needs 4K-aligned offset AND length, but the hole itself is
@@ -215,26 +244,42 @@ int scrap_page_read_holes(uint64_t base, int fd, const scrap_entry_t *holes,
         uint32_t a_end  = (h_end + NOX_BLOCK_SIZE - 1) & ~(NOX_BLOCK_SIZE - 1);
         if (a_end > NOX_DATAZONE_SIZE)
             a_end = NOX_DATAZONE_SIZE;   /* zone size is a 4K multiple */
-        uint32_t a_len  = a_end - a_off;
 
-        /* Land the read at its own intra-page offset inside the scratch zone,
-         * so apply_holes can index scratch exactly like it indexes p->data.
+        /* COALESCE THE WIDENED RANGES. hole_ranges returns holes sorted and
+         * disjoint, and widening preserves the order — but it can make two
+         * neighbours touch or overlap, because a hole ending mid-block and the
+         * next hole starting inside that same block both widen onto it. Issuing
+         * one pread per hole then sends the SAME 4K block to the device several
+         * times. Measured at 255 entries: 954749 B asked per 262144 B zone, a
+         * 3.64x read amplification against a zone that is only 64 blocks wide.
          *
-         * Zero first: a short read means the region is past EOF, and those
-         * bytes must read back as 0, not as stale scratch contents. This memset
-         * is load-bearing CORRECTNESS, not hygiene — the return value `r` is
-         * only checked for a hard error, so a short read is silently accepted
-         * and the zeroed tail is what makes that safe. */
-        memset(dst + a_off, 0, a_len);
+         * Merging is pure waste removal, never a widening: a_off <= run_end
+         * means the two ranges touch or overlap, so the merged run covers
+         * exactly their union and not one byte more. Ranges separated by a real
+         * gap still get their own pread. The total asked is therefore bounded by
+         * NOX_DATAZONE_SIZE, i.e. read amplification can no longer exceed 1x per
+         * Stage-1 pass. Stage-1 is single-threaded, so every syscall and round
+         * trip removed here comes straight off the drain time. */
+        if (have_run && a_off <= run_end) {
+            if (a_end > run_end)
+                run_end = a_end;         /* extend the open run, no new pread */
+            continue;
+        }
 
-        ssize_t r = io_direct_pread(fd, dst + a_off, a_len,
-                                    (off_t)(base + a_off));
-        if (r < 0)                       /* short read is fine, hard error is not */
+        if (have_run) {
+            if (read_run(base, fd, dst, run_off, run_end) < 0)
+                return -1;
+            asked += run_end - run_off;
+        }
+        run_off  = a_off;
+        run_end  = a_end;
+        have_run = 1;
+    }
+
+    if (have_run) {
+        if (read_run(base, fd, dst, run_off, run_end) < 0)
             return -1;
-
-        /* What the DEVICE was asked for, not what the hole needed: the widening
-         * above is real traffic, and read amplification is measured against it. */
-        asked += a_len;
+        asked += run_end - run_off;
     }
 
     if (bytes_read)

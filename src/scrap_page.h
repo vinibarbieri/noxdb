@@ -134,6 +134,12 @@ uint32_t scrap_page_hole_ranges(const scrap_page_t *p, scrap_entry_t *out,
  * widening to 4K boundaries is real traffic the SSD serves. It is reported here
  * rather than recomputed by the caller so the widening arithmetic lives in
  * exactly one place and the two can never drift apart.
+ *
+ * Widened ranges that touch or overlap are COALESCED into a single pread, so a
+ * 4K block straddled by two holes is fetched once, not twice. Merging never
+ * spans a real gap, so the reads cover exactly the union of the widened holes:
+ * `bytes_read` is therefore always <= NOX_DATAZONE_SIZE, and the number of
+ * preads is at most the 64 blocks of the zone regardless of NOX_MAX_ENTRIES.
  */
 int  scrap_page_read_holes(uint64_t base, int fd, const scrap_entry_t *holes,
                            uint32_t nh, void *scratch, uint64_t *bytes_read);
