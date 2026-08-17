@@ -82,8 +82,22 @@
 /* Far fewer shared bases than threads ON PURPOSE: this is what forces
  * "overlapping," i.e. multiple threads resolving to the SAME page_index
  * bucket entry / scrap_page_t / per-page lock / OTflush queue slot, which is
- * exactly the case the C3 and C4 (gate-c4) drivers partition away from. */
+ * exactly the case the C3 and C4 (gate-c4) drivers partition away from.
+ *
+ * 4 is the soak's real setting and the board's case; do not change it here.
+ * Override it only to vary the OVERLAP RATIO, via `make soak-c4 SOAK_BASES=<n>`,
+ * which rebuilds through the same stamp NOX_ENTRIES uses so a stale object can
+ * never be relinked under a new value.
+ *
+ * CEILING: a thread is pinned to one base for the whole run, so the bases
+ * actually used is min(nthreads, SHARED_BASES). Raising this ABOVE nthreads
+ * changes nothing at all — measured the hard way: 4 threads at SHARED_BASES 4
+ * and at 4096 produced a bit-for-bit identical write path, and the three runs'
+ * drain times (224s / 260s / 403s) were three samples of one configuration.
+ * To change the overlap, move nthreads relative to this, not this alone. */
+#ifndef SHARED_BASES
 #define SHARED_BASES        4u
+#endif
 
 #define SOAK_MAXLEN          512u    /* max size of one chaotic write */
 #define STALL_NS             200000L /* same bound as gate-c4: RAM-copy scale */
@@ -159,6 +173,36 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* Take one RSS reading and append it to the series. Factored out of the loop
+ * below so the mandatory deadline sample goes through EXACTLY the same path as
+ * the periodic ones - no second copy to drift out of sync. */
+static void rss_take_sample(rss_monitor_t *m, uint64_t t0, int *warned_unavailable)
+{
+    long kb = read_rss_kb();
+    uint64_t elapsed_s = (now_ns() - t0) / 1000000000ull;
+
+    if (kb < 0 && !*warned_unavailable) {
+        fprintf(stderr,
+                "note: RSS sampling unavailable on this platform "
+                "(no /proc/self/status) - RSS column will read -1 "
+                "throughout. This is expected off Linux; run on the "
+                "bench box for a real reading.\n");
+        *warned_unavailable = 1;
+    }
+
+    pthread_mutex_lock(&m->mtx);
+    if (m->n < m->cap) {
+        m->samples[m->n].t_s = elapsed_s;
+        m->samples[m->n].kb  = kb;
+        m->n++;
+    }
+    pthread_mutex_unlock(&m->mtx);
+
+    printf("[rss] t=%6llus  VmRSS=%6ld kB\n",
+           (unsigned long long)elapsed_s, kb);
+    fflush(stdout);
+}
+
 static void *rss_monitor_loop(void *arg)
 {
     rss_monitor_t *m = arg;
@@ -166,35 +210,28 @@ static void *rss_monitor_loop(void *arg)
     int warned_unavailable = 0;
 
     while (!atomic_load(&g_stop)) {
-        long kb = read_rss_kb();
-        uint64_t elapsed_s = (now_ns() - t0) / 1000000000ull;
-
-        if (kb < 0 && !warned_unavailable) {
-            fprintf(stderr,
-                    "note: RSS sampling unavailable on this platform "
-                    "(no /proc/self/status) - RSS column will read -1 "
-                    "throughout. This is expected off Linux; run on the "
-                    "bench box for a real reading.\n");
-            warned_unavailable = 1;
-        }
-
-        pthread_mutex_lock(&m->mtx);
-        if (m->n < m->cap) {
-            m->samples[m->n].t_s = elapsed_s;
-            m->samples[m->n].kb  = kb;
-            m->n++;
-        }
-        pthread_mutex_unlock(&m->mtx);
-
-        printf("[rss] t=%6llus  VmRSS=%6ld kB\n",
-               (unsigned long long)elapsed_s, kb);
-        fflush(stdout);
+        rss_take_sample(m, t0, &warned_unavailable);
 
         /* Sleep in short slices so a short smoke run (SOAK_SECONDS small)
          * doesn't overshoot its deadline waiting on one long sleep. */
         for (unsigned s = 0; s < RSS_SAMPLE_INTERVAL_S && !atomic_load(&g_stop); s++)
             sleep(1);
     }
+
+    /* MANDATORY FINAL SAMPLE, taken at the write deadline.
+     *
+     * Without it a run shorter than RSS_SAMPLE_INTERVAL_S produced exactly ONE
+     * sample - the one at t=0, before a single write - and criterion 2 then
+     * compared that reading against itself, got a growth of 0 by construction,
+     * and printed PASS. Measured the hard way: `soak-c4 SOAK_SECONDS=3
+     * SOAK_THREADS=16` reported "RSS FLAT: PASS / growth=0 kB" on a run whose
+     * true peak was ~5.9 GB, because the producer runs at ~2 GB/s of scrap RAM
+     * and every byte of it accumulated between t=0 and the deadline.
+     *
+     * This is the real fix: it makes the short run MEASURE rather than merely
+     * decline to judge. The nsamp<2 guard on the criterion is a backstop for
+     * the case this cannot cover (sample array full). */
+    rss_take_sample(m, t0, &warned_unavailable);
     return NULL;
 }
 
@@ -312,6 +349,18 @@ int main(int argc, char **argv)
     for (uint64_t t = 0; t < nthreads; t++)
         counts[t % SHARED_BASES]++;
 
+    /* A thread is pinned to base (t % SHARED_BASES) for the WHOLE run, so the
+     * number of bases actually touched is capped by nthreads: raising
+     * SHARED_BASES past that spreads nothing and writes nothing to the extra
+     * regions. Both numbers below are needed for honest reporting, and the
+     * second one decides whether this run tests what the file header claims. */
+    uint32_t used_bases   = (nthreads < (uint64_t)SHARED_BASES)
+                                ? (uint32_t)nthreads : SHARED_BASES;
+    uint32_t max_per_base = 0;
+    for (uint32_t b = 0; b < used_bases; b++)
+        if (counts[b] > max_per_base)
+            max_per_base = counts[b];
+
     worker_t  *w  = calloc((size_t)nthreads, sizeof(*w));
     pthread_t *th = calloc((size_t)nthreads, sizeof(*th));
     if (!w || !th) { perror("calloc"); return 1; }
@@ -352,9 +401,28 @@ int main(int argc, char **argv)
     }
 
     printf("otflush soak: path=%s seconds=%llu threads=%llu shared_bases=%u "
-           "(overlapping-base contention; see file header for why)\n",
+           "used_bases=%u threads_per_base=%u\n",
            path, (unsigned long long)seconds, (unsigned long long)nthreads,
-           SHARED_BASES);
+           SHARED_BASES, used_bases, max_per_base);
+
+    /* THE banner used to claim "overlapping-base contention" unconditionally,
+     * which is false whenever every base has exactly one thread — that is the
+     * DISJOINT case gate-c4 already covers, and the run proves nothing this
+     * driver exists to prove. It is a real trap: `SOAK_THREADS=4` with the
+     * default SHARED_BASES=4 gives one thread per base, so a whole series of
+     * smoke runs can look like contention testing while testing none. Say which
+     * case is actually running, loudly, instead of asserting the wrong one. */
+    if (max_per_base < 2)
+        fprintf(stderr,
+                "WARNING: NOT an overlapping-base run. Every base has exactly "
+                "one thread, so no two threads share a scrap_page_t, a page "
+                "lock or a queue slot — this is the DISJOINT case gate-c4 "
+                "already covers. Overlap needs nthreads > SHARED_BASES (e.g. "
+                "the 16/4 default = 4 threads per base).\n");
+    else
+        printf("  overlapping-base contention: %u threads per base, %u B stripe "
+               "each (see file header for why disjoint bytes + shared pages)\n",
+               max_per_base, REG / max_per_base);
 
     uint64_t t_start = now_ns();
     uint64_t deadline = t_start + seconds * 1000000000ull;
@@ -437,14 +505,34 @@ int main(int argc, char **argv)
             bad = 1;
         } else {
             uint8_t *whole = calloc(1, REG);   /* reassembled expected page */
-            for (uint32_t b = 0; b < SHARED_BASES && !bad; b++) {
+            /* used_bases, NOT SHARED_BASES: no thread is pinned to a base past
+             * that, so those regions were never written and the file simply
+             * ends. Walking them preads past EOF, which returns a SHORT READ
+             * (not an error) and used to be reported through perror — printing
+             * "verify pread: Success" and failing criterion 1 on a run with no
+             * corruption in it at all. */
+            for (uint32_t b = 0; b < used_bases && !bad; b++) {
                 memset(whole, 0, REG);
                 for (uint64_t t = 0; t < nthreads; t++)
                     if ((t % SHARED_BASES) == b)
                         memcpy(whole + w[t].stripe_start, w[t].shadow, w[t].stripe_width);
 
-                if (pread(fd, disk, REG, (off_t)((uint64_t)b * REG)) != (ssize_t)REG) {
+                ssize_t rd = pread(fd, disk, REG, (off_t)((uint64_t)b * REG));
+                if (rd < 0) {
                     perror("verify pread");
+                    bad = 1;
+                    break;
+                }
+                if (rd != (ssize_t)REG) {
+                    /* Distinct from an error AND from a mismatch: the engine
+                     * did not write as far as it should have. errno is stale
+                     * here, so perror would be actively misleading. */
+                    fprintf(stderr,
+                            "verify: SHORT READ at base %u (offset %llu): got "
+                            "%zd of %u bytes — the file ends before a region "
+                            "the workload wrote\n",
+                            b, (unsigned long long)((uint64_t)b * REG),
+                            rd, (unsigned)REG);
                     bad = 1;
                     break;
                 }
@@ -470,23 +558,46 @@ int main(int argc, char **argv)
     size_t nsamp = mon.n;
     long first_kb = nsamp ? mon.samples[0].kb : -1;
     long last_kb  = nsamp ? mon.samples[nsamp - 1].kb : -1;
+    /* PEAK, not last. RSS is not monotonic: between two samples the flush
+     * threads can drain a backlog that had already ballooned, so a last-vs-first
+     * delta can read near zero on a run that really did force the machine to
+     * hold gigabytes of unflushed scrap pages. The peak is what the box
+     * actually had to carry, and it is the quantity C4-B9's watermark exists to
+     * bound - so it is the one the criterion must judge. */
+    long peak_kb = -1;
+    uint64_t peak_t = 0;
+    for (size_t i = 0; i < nsamp; i++) {
+        if (mon.samples[i].kb > peak_kb) {
+            peak_kb = mon.samples[i].kb;
+            peak_t  = mon.samples[i].t_s;
+        }
+    }
     pthread_mutex_unlock(&mon.mtx);
 
     printf("\nRSS time series: %zu samples over %.0fs (interval %us)\n",
            nsamp, t_writes / 1e9, RSS_SAMPLE_INTERVAL_S);
-    printf("RSS first=%ld kB  last=%ld kB  ", first_kb, last_kb);
+    printf("RSS first=%ld kB  last=%ld kB  peak=%ld kB @t=%llus  ",
+           first_kb, last_kb, peak_kb, (unsigned long long)peak_t);
     /* Growth threshold: 64MB. Chosen as "clearly not noise" - a real page
      * (256KB) leak needs only ~256 leaked pages to cross it. Not tuned
      * against a measured drain rate (that tuning is C5r-BUILD's job, see
      * .dev/KANBAN.md C5-rest); this is a smoke threshold for "is it growing
      * at all," not a precision bound. */
-    long growth_kb = (first_kb >= 0 && last_kb >= 0) ? (last_kb - first_kb) : -1;
-    int rss_available = (first_kb >= 0 && last_kb >= 0);
-    int rss_flat = rss_available && (growth_kb <= 64 * 1024);
+    long growth_kb = (first_kb >= 0 && peak_kb >= 0) ? (peak_kb - first_kb) : -1;
+    int rss_available = (first_kb >= 0 && peak_kb >= 0);
+
+    /* ONE sample cannot show growth: first and peak are then the SAME reading,
+     * growth is 0 by construction, and the criterion would announce PASS having
+     * measured nothing at all. The deadline sample above should make this
+     * unreachable for any run that does real work; it stays as a backstop (the
+     * sample array filling up would also land here). INCONCLUSIVE is never a
+     * PASS - see the overall verdict below. */
+    int rss_conclusive = (nsamp >= 2);
+    int rss_flat = rss_available && rss_conclusive && (growth_kb <= 64 * 1024);
     if (!rss_available)
         printf("(unavailable on this platform)\n");
     else
-        printf("growth=%ld kB\n", growth_kb);
+        printf("growth(peak-first)=%ld kB\n", growth_kb);
 
     int stalled = (p999 > (uint64_t)STALL_NS);
 
@@ -494,18 +605,38 @@ int main(int argc, char **argv)
     printf("1. INTEGRITY  (memcmp vs shadow):        %s%s\n",
            bad ? "FAIL" : "PASS",
            bad ? "  <- expected until C4-B8 (FLUSHING swap) lands; see header" : "");
-    printf("2. RSS FLAT   (no monotonic growth):     %s%s\n",
-           rss_available ? (rss_flat ? "PASS" : "FAIL") : "SKIP (no /proc/self/status)",
-           (rss_available && !rss_flat)
-               ? "  <- expected until C4-B9 (eviction watermark) lands; see header"
-               : "");
+    /* Four states, not two. SKIP and INCONCLUSIVE are NOT the same thing and
+     * must not print the same word: SKIP means this platform can never measure
+     * RSS (no /proc/self/status), so the run still validates criteria 1 and 3;
+     * INCONCLUSIVE means THIS run was too short to measure it - an operator
+     * error, fixable by running longer, and never a pass. */
+    const char *rss_verdict, *rss_note = "";
+    if (!rss_available) {
+        rss_verdict = "SKIP (no /proc/self/status)";
+    } else if (!rss_conclusive) {
+        rss_verdict = "INCONCLUSIVE";
+        rss_note = "  <- only 1 sample; run longer than RSS_SAMPLE_INTERVAL_S";
+    } else if (rss_flat) {
+        rss_verdict = "PASS";
+    } else {
+        rss_verdict = "FAIL";
+        rss_note = "  <- expected until C4-B9 (eviction watermark) lands; see header";
+    }
+    printf("2. RSS FLAT   (peak vs first):           %s%s\n", rss_verdict, rss_note);
     printf("3. NO STALL   (p99.9 <= %ldns):           %s\n",
            STALL_NS, stalled ? "FAIL" : "PASS");
 
-    int overall_pass = !bad && !stalled && (!rss_available || rss_flat) && !werr && !close_err;
+    /* A real failure outranks an inconclusive one: if integrity broke, the run
+     * FAILED regardless of how much of criterion 2 we managed to measure. */
+    int rss_grew      = rss_available && rss_conclusive && !rss_flat;
+    int inconclusive  = rss_available && !rss_conclusive;
+    int real_fail     = bad || stalled || rss_grew || werr || close_err;
+    int overall_pass  = !real_fail && !inconclusive;
+
     printf("\nC4 SOAK: %s (see per-criterion lines above; a FAIL on 1 or 2 "
            "alone is the DOCUMENTED C5-core gap, not a mystery - see this "
-           "file's header)\n", overall_pass ? "PASS" : "FAIL");
+           "file's header)\n",
+           real_fail ? "FAIL" : (inconclusive ? "INCONCLUSIVE" : "PASS"));
 
     free(all);
     for (uint64_t t = 0; t < nthreads; t++) { free(w[t].shadow); free(w[t].lat); }
