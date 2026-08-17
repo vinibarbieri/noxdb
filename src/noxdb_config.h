@@ -121,11 +121,27 @@
  * 4MB write nearly saturates the device.
  *
  * DIVERGENCE (spec §3, D1): the paper counts async submit_bio/bi_end_io, so it
- * has many I/Os in flight per thread. We bracket a BLOCKING pread/pwrite, so
- * in-flight bytes max out at threads * 256KB = 512KB at the default 1+1 pool.
- * This threshold therefore CANNOT be reached below ~16 background threads. It
- * is implemented faithfully anyway so the mechanism exists and can be exercised
- * by raising the pool size in C10. */
+ * has many I/Os in flight per thread. We bracket a BLOCKING pread/pwrite, so a
+ * thread contributes only its ONE outstanding request. The per-stage ceilings
+ * are NOT symmetric, because Stage-2 batches:
+ *   Stage-1: 256KB per thread   (one pread of a page's holes, otflush.c:293)
+ *   Stage-2: 2MB  per thread    (NOX_PWRITEV_MAX_IOV * 256KB, otflush.c:425)
+ * At the default 1+1 pool the ceiling is therefore 256KB + 2MB = 2.25MB, and
+ * the threshold cannot be reached. It goes live at TWO Stage-2 threads
+ * (2 * 2MB = 4MB) — not at the ~16 an earlier version of this comment claimed
+ * by pricing Stage-2 at 256KB and missing the batch.
+ *
+ * That number matters beyond arithmetic: both ssd_is_busy branches
+ * (otflush.c:263 and :390) re-push to the queue TAIL, which reorders two pages
+ * of the SAME base. Q1 being FIFO with a single Stage-1 thread is half of the
+ * writeback-ordering invariant (otflush.c:68) — reordering there lets an older
+ * page be written after a newer one and LOSE that update. So raising
+ * NOX_STAGE2_THREADS in C10 arms a dormant correctness bug, and the re-push
+ * must become order-preserving (per-base, not a single tail) before the pool
+ * grows. bench/otflush_soak.c is the driver that would catch it.
+ *
+ * The mechanism is implemented faithfully anyway so it exists and can be
+ * exercised once that is fixed. */
 #define NOX_BCOUNT_BUSY_THRESHOLD (4u << 20)   /* 4 MB */
 
 /* Max iovecs per Stage-2 pwritev: 8 * 256KB = 2MB per syscall (docs/02 §2). */
