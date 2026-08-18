@@ -45,6 +45,13 @@ struct otflush {
     /* --- per-base writeback ordering guard (see wb_guard_* below) --------- */
     pthread_cond_t   wb_done;    /* signalled when a base leaves the guard */
     uint32_t         wb[NOX_WB_GUARD_SLOTS];
+
+    /* Latch for the queue-depth notice (warn_if_deep): once per engine, not
+     * once per crossing. Atomic because the foreground calls it concurrently
+     * from every writer thread with only p->lock held, and p->lock is a
+     * PER-PAGE lock - two threads on different pages are not serialised
+     * against each other here. */
+    atomic_flag      deep_noticed;
 };
 
 /*
@@ -191,16 +198,38 @@ static void latch_io_error(otflush_t *o)
 
 /* --- enqueue (foreground; caller holds p->lock) ------------------------- */
 
+/* Queue-depth notice. NOT a warning any more, and it fires ONCE PER ENGINE.
+ *
+ * Both properties changed when C4-B9 landed. The old text said "RAM is
+ * unbounded until the C5 eviction watermark lands"; the watermark has landed
+ * and arms in nox_open, so that sentence now describes a world the binary no
+ * longer runs in. And the old `== NOX_QUEUE_WARN_DEPTH` test fired once per
+ * CROSSING, which was reasonable while depth grew monotonically to OOM -- but
+ * the gate makes depth oscillate around exactly this mark by design, so a
+ * 120s/16-thread soak printed it 25 times. An alarm that goes off during
+ * correct operation is an alarm its operator learns to skip.
+ *
+ * What survives is genuinely worth saying once: crossing this depth means the
+ * foreground is outrunning Stage-1/Stage-2, so from here on writers WILL be
+ * throttled and the latency tail is the gate, not the device. */
 static void warn_if_deep(otflush_t *o, nox_queue_t *q, const char *name)
 {
     size_t d = nox_queue_depth(q);
-    if (d == NOX_QUEUE_WARN_DEPTH)   /* == so it fires once per crossing */
-        fprintf(stderr,
-                "noxdb: WARNING: OTflush %s depth reached %zu pages (~%zu MB "
-                "of scrap RAM). Foreground is outrunning the flush threads; "
-                "RAM is unbounded until the C5 eviction watermark lands.\n",
-                name, d, (d * NOX_DATAZONE_SIZE) >> 20);
-    (void)o;
+    if (d < NOX_QUEUE_WARN_DEPTH)
+        return;
+
+    /* test-and-set returns the PREVIOUS value: the first caller through gets 0
+     * and prints, every later one gets 1 and returns. */
+    if (atomic_flag_test_and_set(&o->deep_noticed))
+        return;
+
+    fprintf(stderr,
+            "noxdb: NOTE: OTflush %s reached %zu pages (~%zu MB of scrap RAM). "
+            "The foreground is outrunning the flush threads, so the C4-B9 "
+            "watermark is now throttling writers at %u live pages; expect "
+            "foreground stalls in the latency tail. Reported once per engine.\n",
+            name, d, (d * (size_t)NOX_DATAZONE_SIZE) >> 20,
+            NOX_WATERMARK_HIGH);
 }
 
 void otflush_enqueue_partial(otflush_t *o, scrap_page_t *p)
@@ -459,6 +488,9 @@ otflush_t *otflush_start(page_index_t *idx, int fd)
     o->idx = idx;
     o->fd  = fd;
     atomic_init(&o->bcount, 0);
+    /* Explicit clear, not the calloc: C11 does not promise an all-zero object
+     * is a cleared atomic_flag, only ATOMIC_FLAG_INIT or this call does. */
+    atomic_flag_clear(&o->deep_noticed);
 
     if (pthread_mutex_init(&o->mtx, NULL) != 0)   { free(o); return NULL; }
     if (pthread_cond_init(&o->idle, NULL) != 0)   { goto fail_mtx; }
