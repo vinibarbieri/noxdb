@@ -14,6 +14,7 @@
 #include "scrap_page.h"
 #include "otflush.h"
 #include "nox_stats.h"
+#include "watermark.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -56,6 +57,12 @@ nox_engine_t *nox_open(const char *path)
         free(e);
         return NULL;
     }
+
+    /* Arm the backpressure gate only once the flusher is actually running
+     * (C4-B9). The gate is released exclusively by page frees, and only OTflush
+     * frees pages, so arming before otflush_start would open a window in which a
+     * foreground thread could park with nothing alive to wake it. */
+    nox_watermark_arm(NOX_WATERMARK_HIGH, NOX_WATERMARK_LOW);
     return e;
 }
 
@@ -68,6 +75,23 @@ static int scrap_write_chunk(nox_engine_t *e, uint64_t base, uint32_t intra,
                              const void *buf, uint32_t len)
 {
     for (;;) {
+        /* BACKPRESSURE ADMISSION POINT (C4-B9). This placement is load-bearing:
+         * here the caller holds NO lock — not this base's page lock, not an
+         * index shard lock — so a thread parked on the gate blocks nothing that
+         * the flusher needs in order to retire pages and release it.
+         *
+         * It CANNOT move below page_index_get_or_create: that function returns
+         * with p->lock HELD (see page_index.h), and Stage-1/Stage-2 take that
+         * same page lock to flush and free the page. Waiting while holding it
+         * would park the foreground on a condition only the flusher can satisfy,
+         * while holding the very lock the flusher needs — a hard deadlock, not a
+         * slow path. Same argument applies to the retry iterations: both `continue`
+         * paths below unlock before looping, so we re-enter here lock-free.
+         *
+         * No-op while the level is under the high mark, which is every run that
+         * is not memory-starved. */
+        nox_watermark_wait();
+
         int created;
         /* Lock coupling in the index closes the old get-then-lock window (C3
          * debt); see the contract block in page_index.h. Returns p->lock HELD. */
@@ -206,6 +230,15 @@ int nox_close(nox_engine_t *e)
      *      cannot be inside nox_write and nox_close at once.
      *   3. drain again, then stop and join. */
     otflush_t *ot = e->ot;
+
+    /* DISARM FIRST, before any drain (C4-B9). The gate's only release mechanism
+     * is a page free, and only the flusher frees pages; once shutdown starts,
+     * that source is going away. A foreground thread still parked at the high
+     * mark would then have nobody left to wake it and would hang forever, taking
+     * the join in otflush_stop down with it. disarm() is permanent: it wakes
+     * every waiter and turns all subsequent wait() calls into no-ops, so a late
+     * write racing shutdown passes straight through instead of blocking. */
+    nox_watermark_disarm();
 
     int err = otflush_drain(ot);            /* 1 */
     page_index_foreach(e->idx, enqueue_one, ot);  /* 2 */

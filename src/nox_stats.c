@@ -10,6 +10,7 @@
 #ifdef NOX_STATS
 
 #include "noxdb_config.h"
+#include "watermark.h"
 
 #include <stdatomic.h>
 
@@ -142,6 +143,32 @@ void nox_stats_dump(FILE *out)
                 (double)dw / (double)ub);
         fprintf(out, "  READ  AMPLIFICATION: %.2fx   (disk read / user accepted)\n",
                 (double)dr / (double)ub);
+    }
+
+    /* What the C4-B9 backpressure gate actually cost the foreground. These come
+     * straight from watermark.c's own counters rather than through a nox_stat_*
+     * hook: the gate already keeps them under its mutex, and mirroring them into
+     * a second set of atomics would only create a way for the two to disagree. */
+    uint64_t bc = nox_watermark_blocked_count();
+    uint64_t bn = nox_watermark_blocked_ns();
+
+    if (bc == 0) {
+        /* The expected result for gate-c4 (385 pages vs a 4096-page high mark),
+         * and a meaningful negative: it says the latency distribution this build
+         * reports was produced with the gate never engaging, so backpressure
+         * cannot be an explanation for anything in it. */
+        fprintf(out, "\n  backpressure gate: NEVER ENGAGED (0 stalls, high = %u live pages)\n",
+                NOX_WATERMARK_HIGH);
+    } else {
+        fprintf(out, "\n  backpressure stalls:       %llu\n",
+                (unsigned long long)bc);
+        /* Summed across every foreground thread, NOT wall-clock. Exceeding the
+         * run's elapsed time is correct and expected: it is aggregate stall, not
+         * a latency. */
+        fprintf(out, "  total stall (all threads): %.3f ms\n",
+                (double)bn / 1e6);
+        fprintf(out, "  mean stall per block:      %.3f ms\n",
+                (double)bn / (double)bc / 1e6);
     }
 
     fputc('\n', out);

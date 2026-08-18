@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include "scrap_page.h"
 #include "io_direct.h"
+#include "watermark.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -67,13 +68,27 @@ scrap_page_t *scrap_page_alloc(uint64_t base, uint16_t ssd_id)
      * and flush. Distinct from the index shard locks; the two are never held
      * simultaneously (see scrap_write_chunk), so there is no lock-order risk. */
     pthread_mutex_init(&p->lock, NULL);
+
+    /* C4-B9: the watermark level is maintained HERE, at the two ends of the
+     * page lifecycle, and deliberately NOT at the call sites. There is one alloc
+     * site but THREE frees (otflush.c, and two in page_index.c), so instrumenting
+     * callers means the next free added anywhere silently escapes the accounting
+     * and the gate leaks its level upward until it never releases. Counting at
+     * the constructor/destructor makes that structurally impossible.
+     *
+     * Only on the fully successful path: a failed alloc returns NULL above
+     * WITHOUT having counted, so a caller that gets NULL owes no free. */
+    nox_watermark_note_alloc();
     return p;
 }
 
 void scrap_page_free(scrap_page_t *p)
 {
+    /* Same NULL guard the function already had, so a free(NULL)-style call is
+     * still a no-op and cannot decrement a level it never incremented. */
     if (!p)
         return;
+    nox_watermark_note_free();
     pthread_mutex_destroy(&p->lock);
     free(p->data);
     free(p);

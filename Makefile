@@ -186,8 +186,17 @@ test-queue-tsan:
 	./bench/queue_test_tsan
 
 test-holes:
-	$(CC) $(CFLAGS) -o bench/holes_test src/scrap_page.c bench/holes_test.c $(LDFLAGS)
+	$(CC) $(CFLAGS) -o bench/holes_test src/scrap_page.c src/watermark.c bench/holes_test.c $(LDFLAGS)
 	./bench/holes_test
+
+test-watermark:
+	$(CC) $(CFLAGS) -o bench/watermark_test src/watermark.c bench/watermark_test.c $(LDFLAGS)
+	./bench/watermark_test
+
+test-watermark-tsan:
+	$(CC) $(CFLAGS) -fsanitize=thread -g -o bench/watermark_test_tsan \
+	    src/watermark.c bench/watermark_test.c $(LDFLAGS)
+	./bench/watermark_test_tsan
 
 # Sync only source/build files to the bench box (rsync, key auth, host alias).
 deploy:
@@ -203,9 +212,10 @@ clean:
 	    $(GATE_C4) bench/otflush_test_tsan bench/otflush_test_zero $(GATE_C4_SOAK) \
 	    bench/pc_queue_toy bench/pc_queue_toy_tsan bench/pwritev_toy \
 	    bench/queue_test bench/queue_test_tsan bench/holes_test \
+	    bench/watermark_test bench/watermark_test_tsan \
 	    bench/otflush_test_stats bench/otflush_soak_stats .entries-stamp
 
 .PHONY: FORCE all bench probe gate gate-c3 gate-c3-tsan gate-c4 gate-c4-tsan \
     gate-c4-zero soak-c4 stats-c4 stats-soak \
     toy-pc toy-pc-tsan toy-pwritev deploy clean \
-    test-queue test-queue-tsan test-holes
+    test-queue test-queue-tsan test-holes test-watermark test-watermark-tsan

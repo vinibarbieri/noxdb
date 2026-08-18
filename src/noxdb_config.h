@@ -147,10 +147,68 @@
 /* Max iovecs per Stage-2 pwritev: 8 * 256KB = 2MB per syscall (docs/02 §2). */
 #define NOX_PWRITEV_MAX_IOV  8u
 
-/* Soft warning threshold on queue depth. Warns on stderr, NEVER blocks —
- * blocking would violate C4-GATE's "foreground never stalls". Real RAM bounding
- * is the C5 eviction watermark (spec §3, D5). */
+/* Soft warning threshold on queue depth. Warns on stderr, NEVER blocks — this
+ * constant itself enforces nothing.
+ *
+ * SUPERSEDED IN PART by NOX_WATERMARK_HIGH below, which is set to this same
+ * value and DOES block. The two are not redundant: this one counts QUEUE DEPTH
+ * and only prints, the watermark counts LIVE PAGES and gates. Because they share
+ * a number, the warning now fires at roughly the moment the gate engages, which
+ * is the useful reading of it — it went from announcing a threshold nothing acted
+ * on to annotating the instant backpressure starts.
+ *
+ * The original note here said RAM bounding was deferred to C5. That is what
+ * C4-B9 built; see NOX_WATERMARK_HIGH for why blocking the foreground does not
+ * contradict C4-GATE's "foreground never stalls". */
 #define NOX_QUEUE_WARN_DEPTH 4096u
+
+/* C4-B9 (spec §3.6): eviction watermark. The high/low marks of the foreground
+ * backpressure gate implemented in watermark.c.
+ *
+ * THIS IS A MEMORY-PRESSURE FALLBACK, NOT THE FLUSH TRIGGER. Do not conflate it
+ * with the Queue-1 enqueue decision: a partial page enters Q1 at CREATION time
+ * (paper §3.4), driven by page lifecycle, not by how much RAM is resident. In a
+ * healthy run these marks are never reached and the gate costs one counter
+ * update per page. They exist only for the pathological case where the device
+ * cannot retire pages as fast as the foreground mints them.
+ *
+ * THE UNIT IS LIVE PAGES, NOT QUEUE DEPTH. A page occupies its 256KB data zone
+ * from scrap_page_alloc until scrap_page_free, and for part of that life it is
+ * resident in the index and NOT yet in either queue (it is still absorbing
+ * merges). Gating on queue depth would therefore undercount exactly the pages
+ * that are costing RAM without being anybody's work item. Hence:
+ *   4096 pages x 256KB = 1 GiB resident   (high)
+ *   3072 pages x 256KB = 768 MiB resident (low)
+ *
+ * HIGH DELIBERATELY EQUALS NOX_QUEUE_WARN_DEPTH above. That number was already
+ * the documented soft cap, it was just never enforced by anything — the warning
+ * fired and the engine kept allocating. Reusing it means the stderr warning now
+ * marks the instant the gate actually engages instead of announcing a threshold
+ * nothing acts on.
+ *
+ * WHY A BAND AND NOT A SINGLE MARK. With one threshold, a free at `high` wakes a
+ * sleeper, that sleeper allocates, the level crosses back up, and the next free
+ * wakes it again: a wake/re-sleep storm, one broadcast per allocation, on the
+ * foreground path. The band batches releases — one broadcast frees the whole
+ * waiting set and gives it a full band of headroom before anyone stalls again.
+ *
+ * BAND SIZING, from measurements on the bench box (16 threads, swap off, XFS on
+ * NVMe): the flusher drains 1935 pages/s, so the 1024-page band is ~0.53 s of
+ * drain. That is the FLOOR on how long a stalled foreground thread waits once it
+ * parks — shrink the band and you trade stall length for wake frequency. The
+ * producer side measured 9585 pages/s against that 1935: a 5.0x imbalance, which
+ * is precisely the ratio the backpressure has to impose on the foreground for
+ * the run to reach steady state at all.
+ *
+ * WHY gate-c4's EVIDENCE STILL STANDS: it creates 385 pages against a 4096-page
+ * mark, so the gate never engages there and its p99.9 latency numbers are
+ * unaffected by this change. bench/otflush_soak.c is the binding case — it peaks
+ * near 22400 live pages, ~5.5x over the high mark.
+ *
+ * These are a defensible STARTING POINT, not a tuned result. Tuning them against
+ * the soak's RSS/throughput curve is the C5-rest card, not this one. */
+#define NOX_WATERMARK_HIGH   4096u
+#define NOX_WATERMARK_LOW    3072u
 
 /* Writeback ordering guard (otflush.c). A counting array, not an exact set:
  * collisions cost a spurious wait, never a missed ordering constraint. 8192
