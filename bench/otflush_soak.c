@@ -10,9 +10,9 @@
  * scrap_page_t, same per-page lock, same OTflush queue membership) for a
  * SUSTAINED period (>=20 minutes by default), while sampling:
  *   1. INTEGRITY  - one memcmp against a RAM shadow after the run drains.
- *   2. RSS        - a time series read from /proc/self/status, so monotonic
- *                   growth (unbounded RAM) is visible, not just a single
- *                   before/after number.
+ *   2. RSS        - a time series read from /proc/self/status, checked for a
+ *                   BOUNDED plateau (ceiling + plateau sub-tests, see criterion
+ *                   2 below), not for flatness.
  *   3. LATENCY    - the same foreground-never-stalls check as gate-c4, run
  *                   under sustained overlapping-base contention instead of a
  *                   short disjoint-base burst.
@@ -20,12 +20,13 @@
  * WHY THIS IS EXPECTED TO SURFACE KNOWN, DOCUMENTED GAPS (read before filing
  * a bug against OTflush over a soak FAIL):
  *
- *   - RSS growth -> C4-B9 (spec 3.6, the eviction watermark) is NOT built in
- *     C4. noxdb_config.h says it outright: "Real RAM bounding is the C5
- *     eviction watermark (spec 3, D5)." Nothing in C4 throttles a foreground
- *     that outruns Stage-1/Stage-2, so a long enough run at a high enough
- *     thread count WILL grow Q1/Q2 backlog RAM without bound. A growing RSS
- *     time series below is that gap made visible, not a mystery leak.
+ *   - RSS growth -> WAS the C4-B9 gap; B9 (spec 3.6, the eviction watermark,
+ *     src/watermark.c) IS NOW BUILT and arms in nox_open. The foreground is
+ *     gated at NOX_WATERMARK_HIGH live pages, so RSS ramps to a plateau
+ *     instead of running to OOM. Before B9 this driver at 16 threads peaked at
+ *     5.6GB in 3 seconds and the 120s run was OOM-killed; after B9 the same
+ *     3s run peaks at ~158MB. CRITERION 2 NO LONGER HAS A DOCUMENTED EXCUSE -
+ *     a FAIL there is a defect to chase, not a known gap to wave through.
  *
  *   - Integrity mismatches on OVERLAPPING bases -> C4-B8 (the tag=FLUSHING
  *     pointer-swap protocol) is also NOT built in C4. src/page_index.h says
@@ -116,6 +117,38 @@
 
 /* How often the RSS monitor thread samples /proc/self/status, in seconds. */
 #define RSS_SAMPLE_INTERVAL_S 5u
+
+/* Headroom added on top of the computed page + driver footprint before the
+ * ceiling sub-test calls a run unbounded. Covers what this driver cannot
+ * enumerate: glibc arena fragmentation on a 256KB-chunk workload, OTflush
+ * queue nodes, the page_index shard tables, thread stacks, libc itself.
+ *
+ * 64MB is deliberately generous. The failure this sub-test must catch is
+ * UNBOUNDED growth, which overruns any ceiling by orders of magnitude - the
+ * pre-B9 run of this very driver peaked at 5.6GB against a ~1.1GB ceiling.
+ * A tight bound here would buy nothing and would turn allocator noise into a
+ * red gate. The PLATEAU sub-test below is what catches the small, slow leak
+ * that a loose ceiling would sail past. */
+#define RSS_CEILING_SLACK_KB  (64u * 1024u)
+
+/* Plateau sub-test: how much the late-run RSS peak may exceed the mid-run
+ * peak before it counts as still-growing. Same 64MB smoke scale, but applied
+ * to a DIFFERENCE BETWEEN TWO WINDOWS rather than to an absolute level, which
+ * is what makes it scale-free: it asks "did RSS stop climbing", a question
+ * whose answer does not depend on how big the watermark ceiling happens to be.
+ *
+ * Sensitivity at the 1200s C4-G7 default: each window is ~450s, so this trips
+ * on a sustained leak of ~142 kB/s - roughly one 256KB scrap page every 1.8s
+ * against a creation rate of ~2650 pages/s. Small leaks below that rate need a
+ * longer run to surface, which is precisely why C4-G7 is 20 minutes and not 3
+ * seconds. */
+#define RSS_PLATEAU_SLACK_KB  (64u * 1024u)
+
+/* Minimum samples for the plateau sub-test: 25% warm-up plus two comparison
+ * windows, each needing >= 3 samples to have a meaningful peak. Below this the
+ * sub-test is SKIPPED, not failed - a smoke run is too short to have a plateau,
+ * and the ceiling sub-test still judges it. */
+#define RSS_PLATEAU_MIN_SAMPLES 8u
 
 static nox_engine_t *g_engine;
 
@@ -553,7 +586,33 @@ int main(int argc, char **argv)
         close(fd);
     }
 
-    /* --- Criterion 2: RSS flat, judged from the monitor's time series. --- */
+    /* --- Criterion 2: RSS BOUNDED, judged from the monitor's time series. ---
+     *
+     * THIS CRITERION WAS "RSS FLAT (growth <= 64MB)" UNTIL C4-B9 LANDED, and
+     * that test measured the wrong property once the watermark existed. B9 does
+     * not promise flat, it promises BOUNDED: the foreground is gated at
+     * NOX_WATERMARK_HIGH live pages, so RSS climbs to a plateau and stays
+     * there. A flat-growth test necessarily fails a working watermark - the
+     * first post-B9 3s smoke run peaked at 158MB, well-bounded and 36x below
+     * the 5.6GB it reached without the gate, and the old test still printed
+     * FAIL. A gate that reports FAIL on correct behaviour trains its operator
+     * to ignore it, which is worse than having no gate.
+     *
+     * So the criterion is now two sub-tests, and it takes both:
+     *
+     *   CEILING - peak growth must fit under a bound COMPUTED from the
+     *             watermark config plus this driver's own bookkeeping. Catches
+     *             the failure that actually kills the box (unbounded backlog ->
+     *             OOM), and is derived rather than tuned, so it tracks
+     *             NOX_WATERMARK_HIGH automatically if C5-rest retunes it.
+     *
+     *   PLATEAU - late-run peak must not exceed mid-run peak. Catches the slow
+     *             leak that a deliberately loose ceiling would sail past, and
+     *             does so without any absolute number.
+     *
+     * Neither alone is sufficient. Ceiling alone passes a leak that stays under
+     * 1.1GB for the length of the run; plateau alone passes a run that parks at
+     * a catastrophic-but-stable level. */
     pthread_mutex_lock(&mon.mtx);
     size_t nsamp = mon.n;
     long first_kb = nsamp ? mon.samples[0].kb : -1;
@@ -578,11 +637,6 @@ int main(int argc, char **argv)
            nsamp, t_writes / 1e9, RSS_SAMPLE_INTERVAL_S);
     printf("RSS first=%ld kB  last=%ld kB  peak=%ld kB @t=%llus  ",
            first_kb, last_kb, peak_kb, (unsigned long long)peak_t);
-    /* Growth threshold: 64MB. Chosen as "clearly not noise" - a real page
-     * (256KB) leak needs only ~256 leaked pages to cross it. Not tuned
-     * against a measured drain rate (that tuning is C5r-BUILD's job, see
-     * .dev/KANBAN.md C5-rest); this is a smoke threshold for "is it growing
-     * at all," not a precision bound. */
     long growth_kb = (first_kb >= 0 && peak_kb >= 0) ? (peak_kb - first_kb) : -1;
     int rss_available = (first_kb >= 0 && peak_kb >= 0);
 
@@ -593,11 +647,99 @@ int main(int argc, char **argv)
      * sample array filling up would also land here). INCONCLUSIVE is never a
      * PASS - see the overall verdict below. */
     int rss_conclusive = (nsamp >= 2);
-    int rss_flat = rss_available && rss_conclusive && (growth_kb <= 64 * 1024);
+
     if (!rss_available)
         printf("(unavailable on this platform)\n");
     else
         printf("growth(peak-first)=%ld kB\n", growth_kb);
+
+    /* --- 2a. CEILING -----------------------------------------------------
+     *
+     * DERIVED, never a literal, so that retuning NOX_WATERMARK_HIGH in
+     * noxdb_config.h cannot silently leave this gate testing a stale number.
+     *
+     * Engine term: the watermark caps live pages at NOX_WATERMARK_HIGH, plus
+     * the documented overshoot of up to one page per concurrent foreground
+     * thread (watermark.h, "ACCEPTED IMPRECISION": wait() and note_alloc() are
+     * not atomic, so every thread can slip through the check at once). Each
+     * page is charged its FULL NOX_DATAZONE_SIZE even though a page waiting in
+     * Q1 is typically only ~8% resident - Stage-1's hole fill reads the whole
+     * 256KB zone in, so any page that reaches Stage-1 does become fully
+     * resident, and the ceiling has to cover the worst case, not the observed
+     * mix. (The observed mix is exactly why a 3s run peaks at 158MB against
+     * this ~1.1GB ceiling; do not "tighten" the ceiling to match it. The two
+     * numbers answer different questions.)
+     *
+     * Driver term: this benchmark's own bookkeeping is real RSS and must not be
+     * charged to the engine - per thread, one shadow stripe plus one fixed
+     * latency reservoir. Counted per-thread from w[] rather than assumed
+     * uniform, because stripe width depends on how threads divide across
+     * SHARED_BASES and is NOT the same for every thread when the division is
+     * uneven. */
+    unsigned long long engine_ceiling_kb =
+        ((unsigned long long)NOX_WATERMARK_HIGH + nthreads) *
+        (NOX_DATAZONE_SIZE / 1024ull);
+
+    unsigned long long driver_ceiling_kb = 0;
+    for (uint64_t t = 0; t < nthreads; t++)
+        driver_ceiling_kb += ((unsigned long long)w[t].stripe_width +
+                              (unsigned long long)LAT_RESERVOIR_CAP * sizeof(uint64_t)) / 1024ull;
+
+    unsigned long long ceiling_kb =
+        engine_ceiling_kb + driver_ceiling_kb + RSS_CEILING_SLACK_KB;
+
+    int rss_ceiling_ok = rss_available && rss_conclusive &&
+                         ((unsigned long long)growth_kb <= ceiling_kb);
+
+    if (rss_available && rss_conclusive)
+        printf("  ceiling: growth %ld kB vs %llu kB = "
+               "(%u high + %llu overshoot) x %uB pages + %llu kB driver + %u kB slack -> %s\n",
+               growth_kb, ceiling_kb, NOX_WATERMARK_HIGH,
+               (unsigned long long)nthreads, NOX_DATAZONE_SIZE,
+               driver_ceiling_kb, RSS_CEILING_SLACK_KB,
+               rss_ceiling_ok ? "OK" : "OVER");
+
+    /* --- 2b. PLATEAU -----------------------------------------------------
+     *
+     * Discard the first quarter of the series as warm-up: RSS legitimately
+     * ramps from ~2MB to the watermark plateau, and including that ramp in the
+     * baseline window would make every healthy run look like it is growing.
+     * Then split what is left in half and compare PEAKS, not means - a leak
+     * shows up as a rising ceiling, and a mean would let a single deep drain
+     * mask it.
+     *
+     * SKIPPED, not failed, below RSS_PLATEAU_MIN_SAMPLES. A 3s smoke run has 2
+     * samples and simply has no plateau to inspect; saying FAIL there would be
+     * the same category error this whole criterion was just rewritten to
+     * remove. The C4-G7 default of 1200s yields ~240 samples. */
+    int plateau_ran = 0, rss_plateau_ok = 1;
+    long peak_early_kb = -1, peak_late_kb = -1;
+
+    if (rss_available && nsamp >= RSS_PLATEAU_MIN_SAMPLES) {
+        size_t warm  = nsamp / 4;
+        size_t split = warm + (nsamp - warm) / 2;
+
+        pthread_mutex_lock(&mon.mtx);
+        for (size_t i = warm; i < split; i++)
+            if (mon.samples[i].kb > peak_early_kb) peak_early_kb = mon.samples[i].kb;
+        for (size_t i = split; i < nsamp; i++)
+            if (mon.samples[i].kb > peak_late_kb) peak_late_kb = mon.samples[i].kb;
+        pthread_mutex_unlock(&mon.mtx);
+
+        plateau_ran    = 1;
+        rss_plateau_ok = (peak_late_kb - peak_early_kb) <= (long)RSS_PLATEAU_SLACK_KB;
+
+        printf("  plateau: mid-run peak %ld kB -> late-run peak %ld kB "
+               "(drift %+ld kB, slack %u kB) -> %s\n",
+               peak_early_kb, peak_late_kb, peak_late_kb - peak_early_kb,
+               RSS_PLATEAU_SLACK_KB, rss_plateau_ok ? "OK" : "STILL GROWING");
+    } else if (rss_available) {
+        printf("  plateau: SKIPPED (%zu samples < %u; run >= %us for this sub-test)\n",
+               nsamp, RSS_PLATEAU_MIN_SAMPLES,
+               RSS_PLATEAU_MIN_SAMPLES * RSS_SAMPLE_INTERVAL_S);
+    }
+
+    int rss_bounded = rss_ceiling_ok && (!plateau_ran || rss_plateau_ok);
 
     int stalled = (p999 > (uint64_t)STALL_NS);
 
@@ -616,26 +758,33 @@ int main(int argc, char **argv)
     } else if (!rss_conclusive) {
         rss_verdict = "INCONCLUSIVE";
         rss_note = "  <- only 1 sample; run longer than RSS_SAMPLE_INTERVAL_S";
-    } else if (rss_flat) {
+    } else if (rss_bounded) {
         rss_verdict = "PASS";
     } else {
         rss_verdict = "FAIL";
-        rss_note = "  <- expected until C4-B9 (eviction watermark) lands; see header";
+        /* C4-B9 HAS LANDED. This note used to say the FAIL was expected until
+         * the watermark arrived; saying that now would excuse a real defect.
+         * Which sub-test failed is on the ceiling/plateau lines printed above. */
+        rss_note = !rss_ceiling_ok
+                 ? "  <- REAL: backlog exceeded the watermark ceiling; the gate is not holding"
+                 : "  <- REAL: RSS still climbing late in the run; suspect a leak, not the backlog";
     }
-    printf("2. RSS FLAT   (peak vs first):           %s%s\n", rss_verdict, rss_note);
+    printf("2. RSS BOUNDED (ceiling + plateau):      %s%s\n", rss_verdict, rss_note);
     printf("3. NO STALL   (p99.9 <= %ldns):           %s\n",
            STALL_NS, stalled ? "FAIL" : "PASS");
 
     /* A real failure outranks an inconclusive one: if integrity broke, the run
      * FAILED regardless of how much of criterion 2 we managed to measure. */
-    int rss_grew      = rss_available && rss_conclusive && !rss_flat;
+    int rss_grew      = rss_available && rss_conclusive && !rss_bounded;
     int inconclusive  = rss_available && !rss_conclusive;
     int real_fail     = bad || stalled || rss_grew || werr || close_err;
     int overall_pass  = !real_fail && !inconclusive;
 
-    printf("\nC4 SOAK: %s (see per-criterion lines above; a FAIL on 1 or 2 "
-           "alone is the DOCUMENTED C5-core gap, not a mystery - see this "
-           "file's header)\n",
+    /* Criterion 1 is still the documented C4-B8 gap and may FAIL for a known
+     * reason. Criterion 2 no longer has that excuse - B9 is built, so a FAIL
+     * there is a defect to chase. Keep the two apart in the message. */
+    printf("\nC4 SOAK: %s (see per-criterion lines above; a FAIL on 1 alone is "
+           "the DOCUMENTED C4-B8 gap - a FAIL on 2 is NOT, C4-B9 has landed)\n",
            real_fail ? "FAIL" : (inconclusive ? "INCONCLUSIVE" : "PASS"));
 
     free(all);
