@@ -100,7 +100,25 @@
 #define SHARED_BASES        4u
 #endif
 
+/* Max size of one chaotic write; each write is 1 + rand()%SOAK_MAXLEN, so the
+ * MEAN is about half this. That mean is what decides write amplification, and
+ * it is the whole point of making this overridable:
+ *
+ *   amplification = NOX_DATAZONE_SIZE / (NOX_MAX_ENTRIES * mean_write)
+ *
+ * A page is sealed by whichever runs out first, its data zone or its index. The
+ * crossover is NOX_DATAZONE_SIZE / NOX_MAX_ENTRIES = 262144/64 = 4096 B exactly
+ * at the current header size. Below that mean the index exhausts first and a
+ * mostly-empty 256KB page goes to disk; above it the page genuinely fills.
+ *
+ * The 512 default puts the mean at ~256 B, 16x BELOW the crossover, which is
+ * why this driver reports ~13x amplification. That is a property of the
+ * benchmark, not of the engine, and the override is how you show it:
+ *      make soak-c4 SOAK_MAXLEN=8192      # mean ~4KB, at the crossover
+ */
+#ifndef SOAK_MAXLEN
 #define SOAK_MAXLEN          512u    /* max size of one chaotic write */
+#endif
 #define STALL_NS             200000L /* same bound as gate-c4: RAM-copy scale */
 #define DEFAULT_SECONDS      1200u   /* 20 minutes */
 #define DEFAULT_THREADS      16u
@@ -115,8 +133,17 @@
  * never hides a true worst case. */
 #define LAT_RESERVOIR_CAP    200000u
 
-/* How often the RSS monitor thread samples /proc/self/status, in seconds. */
+/* How often the RSS monitor thread samples /proc/self/status, in seconds.
+ *
+ * Overridable because 5s is a sampling rate for a 20-minute run, not for a
+ * chart. Drawing the pre-watermark RSS curve needs 1s: ungated, this driver
+ * goes from 2.6 MB to OOM in under 6 seconds at 16 threads, which at 5s
+ * resolution is two points and a dead process.
+ *      make soak-c4 RSS_INTERVAL=1
+ * The sample array is sized from seconds/interval, so it follows automatically. */
+#ifndef RSS_SAMPLE_INTERVAL_S
 #define RSS_SAMPLE_INTERVAL_S 5u
+#endif
 
 /* Headroom added on top of the computed page + driver footprint before the
  * ceiling sub-test calls a run unbounded. Covers what this driver cannot

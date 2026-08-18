@@ -25,6 +25,30 @@ SOAK_BASES ?=
 SOAK_FLAGS := $(if $(SOAK_BASES),-DSHARED_BASES=$(SOAK_BASES)u)
 CFLAGS += $(SOAK_FLAGS)
 
+# Soak-only knob (SOAK_MAXLEN, bench/otflush_soak.c). Sets the write-size
+# distribution, which is what decides write amplification -- the crossover is
+# NOX_DATAZONE_SIZE/NOX_MAX_ENTRIES = 4096 B at a 64-entry header, and each
+# write is 1 + rand()%SOAK_MAXLEN so the MEAN is about half this value.
+#   make soak-c4 SOAK_MAXLEN=8192       # mean ~4KB, at the crossover
+SOAK_MAXLEN ?=
+CFLAGS += $(if $(SOAK_MAXLEN),-DSOAK_MAXLEN=$(SOAK_MAXLEN)u)
+
+# Soak-only knob (RSS_SAMPLE_INTERVAL_S, bench/otflush_soak.c). 5s is right for
+# a 20-minute run; use 1 to draw an RSS curve of a run that dies in seconds.
+#   make soak-c4 RSS_INTERVAL=1
+RSS_INTERVAL ?=
+CFLAGS += $(if $(RSS_INTERVAL),-DRSS_SAMPLE_INTERVAL_S=$(RSS_INTERVAL)u)
+
+# Backpressure knob (NOX_WATERMARK_HIGH, src/noxdb_config.h). The low mark
+# follows at 3/4 unless NOX_WATERMARK_LOW is given too. Set it past any reachable
+# depth to build the "before" binary with the gate effectively disarmed, with
+# every other line of the engine identical:
+#   make soak-c4 NOX_WATERMARK=1000000000 SOAK_SECONDS=30 RSS_INTERVAL=1
+NOX_WATERMARK ?=
+NOX_WATERMARK_LOW ?=
+CFLAGS += $(if $(NOX_WATERMARK),-DNOX_WATERMARK_HIGH_OVERRIDE=$(NOX_WATERMARK)u)
+CFLAGS += $(if $(NOX_WATERMARK_LOW),-DNOX_WATERMARK_LOW_OVERRIDE=$(NOX_WATERMARK_LOW)u)
+
 SRC   := $(wildcard src/*.c)
 OBJ   := $(SRC:.c=.o)
 BENCH := bench/benchmark
@@ -47,9 +71,11 @@ $(BENCH): $(OBJ) bench/benchmark.o
 # "64-entry" result that is nothing of the sort. This stamp records EVERY -D
 # knob's current value and forces a rebuild whenever any of them moves. Add new
 # knobs here too, or they inherit exactly the bug this exists to prevent.
+STAMP_KNOBS := $(NOX_ENTRIES)|$(SOAK_BASES)|$(SOAK_MAXLEN)|$(RSS_INTERVAL)|$(NOX_WATERMARK)|$(NOX_WATERMARK_LOW)
+
 .entries-stamp: FORCE
-	@echo '$(NOX_ENTRIES) $(SOAK_BASES)' | cmp -s - $@ 2>/dev/null || \
-	    echo '$(NOX_ENTRIES) $(SOAK_BASES)' > $@
+	@echo '$(STAMP_KNOBS)' | cmp -s - $@ 2>/dev/null || \
+	    echo '$(STAMP_KNOBS)' > $@
 FORCE:
 
 %.o: %.c .entries-stamp

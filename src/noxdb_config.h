@@ -206,9 +206,34 @@
  * near 22400 live pages, ~5.5x over the high mark.
  *
  * These are a defensible STARTING POINT, not a tuned result. Tuning them against
- * the soak's RSS/throughput curve is the C5-rest card, not this one. */
+ * the soak's RSS/throughput curve is the C5-rest card, not this one.
+ *
+ * OVERRIDABLE FROM THE BUILD, same convention as NOX_MAX_ENTRIES_OVERRIDE
+ * above, for two uses:
+ *
+ *   1. Tuning sweeps, once C5-rest gets to them.
+ *   2. Building the "before" binary for a before/after measurement. Set the
+ *      high mark past any depth the run can reach and the gate is effectively
+ *      disarmed while every other line of the engine stays identical:
+ *          make soak-c4 NOX_WATERMARK=1000000000
+ *      One source tree, one -D apart -- the same discipline that made the C4
+ *      eager-zeroing comparison (gate-c4-zero) trustworthy. Do NOT reconstruct
+ *      a "before" by checking out an older commit: the rest of the tree moved.
+ *
+ * The low mark tracks the high one at 3/4 unless overridden separately, so the
+ * disarm-by-override case cannot accidentally invert the two and trip the
+ * `low < high` assert in nox_watermark_arm. */
+#ifdef NOX_WATERMARK_HIGH_OVERRIDE
+#define NOX_WATERMARK_HIGH   ((uint32_t)(NOX_WATERMARK_HIGH_OVERRIDE))
+#else
 #define NOX_WATERMARK_HIGH   4096u
-#define NOX_WATERMARK_LOW    3072u
+#endif
+
+#ifdef NOX_WATERMARK_LOW_OVERRIDE
+#define NOX_WATERMARK_LOW    ((uint32_t)(NOX_WATERMARK_LOW_OVERRIDE))
+#else
+#define NOX_WATERMARK_LOW    ((NOX_WATERMARK_HIGH) / 4u * 3u)
+#endif
 
 /* Writeback ordering guard (otflush.c). A counting array, not an exact set:
  * collisions cost a spurious wait, never a missed ordering constraint. 8192
