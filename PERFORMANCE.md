@@ -455,7 +455,7 @@ reached earlier by the wrong argument.
 Three times as much kernel time as user time, and 0.78 page-faults **per
 foreground write** (39.8M faults against 51.3M writes). The engine is not
 compute-bound; it is bound by syscalls, scheduling and faulting. That ratio is
-the strongest lead this run produced and it is not explained yet.
+the strongest lead this run produced. **§4.7 settles it.**
 
 **Write amplification, device-side.** 51 261 771 writes of 1–512 B (mean
 ≈ 256 B) is ≈ 13.2 GB of logical data; the device wrote 490.8 MB/s × 300.3 s
@@ -477,6 +477,79 @@ the gate. The C4-B9 watermark was confirmed armed and binding — throttling at
 **The tail is still there.** `p99.9 ≈ 102 µs` passes the criterion, but the
 exact maximum was **8.37 s**, with 4 984 foreground writes above 200 µs. The
 off-CPU analysis of that stall remains open (§5); it was 9.77 s when last seen.
+
+### 4.7 Where the page faults come from (2026-09-02)
+
+§4.6 left 39.75M minor faults unexplained. They are the scrap page lifecycle,
+and the accusation can be made on arithmetic alone before any code is read:
+
+```
+147.4 GB written / 262144 B per page   =  562 238 page cycles
+562 238 cycles x 64 pages of 4 KiB     =   36.0 M faults
+measured                               =   39.8 M faults      (ratio 1.10)
+```
+
+A 10% agreement accuses `scrap_page_alloc`/`scrap_page_free`; it does not
+convict them, because the engine does many other things at once. `bench/fault_probe.c`
+removes the engine from the question — it performs only the allocation pattern,
+with no noxdb headers, no `O_DIRECT` and no device, and counts `ru_minflt`:
+
+| arm | faults / cycle | 20 000 cycles |
+|---|---:|---:|
+| A · `posix_memalign` + `free` each cycle (today) | **65.00** | 2.098 s |
+| B · allocate once, reuse | 0.00 | 0.004 s |
+| C · A, with `mallopt` tuned | 0.00 | 0.005 s |
+
+65 against the 64 predicted; the extra one is the header `malloc`. Identical
+across two runs. **The touch loop is the same in all three arms**, so the
+2.094 s separating A from B is allocation and fault handling, not memory
+traffic — 1.61 µs per fault.
+
+**Two glibc policies, not one.** Arm C sets both `M_MMAP_THRESHOLD` and
+`M_TRIM_THRESHOLD`, so it does not say which one mattered. Re-running arm A in
+fresh processes under the environment variables separates them:
+
+| glibc configuration | faults / cycle |
+|---|---:|
+| default | 65.00 |
+| `MALLOC_TRIM_THRESHOLD_` raised | 65.00 |
+| `MALLOC_MMAP_THRESHOLD_` raised | 33.00 |
+| **both raised** | **0.00** |
+
+A 256 KiB zone sits above the 128 KiB `mmap` threshold, so every
+`posix_memalign` is an `mmap` and every `free` a `munmap` — that is the first
+65. Raising the threshold moves the zone onto the heap, where `free` then
+*trims* it back to the kernel — that is the remaining 33. Only disabling both
+reaches zero. **Fixing either one alone would have looked like a 50% win and
+stopped there**, which is the reason this was measured in four configurations
+instead of two.
+
+This also completes a story C4 started. The comment in `scrap_page_alloc`
+already identified the mechanism — "the 256KB zone is fresh virtual memory, so
+the memset was touching all 64 of its 4K pages" — and removed the eager
+`memset` to get those faults off the foreground thread. That worked, and §4.6
+shows what it did not do: the faults were moved, not removed.
+
+**Not fixed, deliberately.** The remedy is a recycling pool for the data zones
+(`scrap_page_alloc` would take a zone from a free list instead of the
+allocator), designed and costed at roughly 150 lines plus a test. It is not
+being built, because it is a *feature*, and the scope decision recorded in
+`plano-semestre-outono-2026.md` freezes the engine at measurement — *"só o
+sweep de medições, sem features novas"*. The finding is the deliverable; the
+fix is out of scope.
+
+**Prediction, recorded for whoever does build it:** the pool removes ~36M of
+the 39.8M faults and returns ~58 s of the 179 s of system time (36.0M ×
+1.61 µs). Throughput should barely move, because §4.6 shows the engine is not
+waiting on the device. The latency tail should improve, because some of this
+fault handling currently lands on the foreground thread.
+
+**Consequence for the thread-scalability sweep.** `munmap` takes the process's
+`mmap_lock` for write. At the 1874 page-cycles/s measured here that is probably
+not a serialisation point — but "probably" is doing real work in that sentence,
+and a thread sweep that is actually measuring `mmap_lock` would look exactly
+like an engine that does not scale. Extending `fault_probe.c` to N threads
+settles it, and costs no new engine code.
 
 ---
 
@@ -573,7 +646,11 @@ but it is not clean and should move off-device.
   made about *why* the baseline plateaus.
 - **CPU efficiency curves.** First point collected (§4.6): IPC 0.68, sys:user
   3:1, ~132k page-faults/s. Not yet a *curve* — one load, one thread count.
-  The page-fault rate needs a cause before any of it means anything.
+  The page-fault rate now has a measured cause (§4.7); the remaining sys time
+  does not.
+- **Thread-scalability sweep.** The §3 sweeps vary *queue depth*, which is a
+  property of the device. Varying noxdb's own thread count is a different
+  measurement and has not been made. See §4.7 for a confound to rule out first.
 - **Effective queue depth of the engine.** ✅ **Measured 2026-08-26 — see
   §4.6. The prediction recorded here was wrong: predicted ≥ 4, measured 1.58.**
 - **The 8.37 s foreground stall.** §4.6 records the exact maximum; the cause is
@@ -617,6 +694,11 @@ sudo systemd-run --unit=noxdb-today --collect \
 # read the result from anywhere; the anchor is the check that matters
 ./tools/fio_report.py /mnt/nvme/results/<run>/rw4k-active \
      --anchor=randwrite4k:2:410.0
+
+# §4.7 page-fault probe. Pure RAM, no device, no O_DIRECT -- runs anywhere
+# glibc runs, and needs no hygiene because it touches no disk.
+cc -std=c11 -O2 -o bench/fault_probe bench/fault_probe.c && ./bench/fault_probe
+MALLOC_MMAP_THRESHOLD_=1048576 MALLOC_TRIM_THRESHOLD_=16777216 ./bench/fault_probe
 
 ./tools/bench_hygiene.sh restore        # give the box back its swap + governor
 ```
