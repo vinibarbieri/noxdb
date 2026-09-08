@@ -533,10 +533,10 @@ shows what it did not do: the faults were moved, not removed.
 **Not fixed, deliberately.** The remedy is a recycling pool for the data zones
 (`scrap_page_alloc` would take a zone from a free list instead of the
 allocator), designed and costed at roughly 150 lines plus a test. It is not
-being built, because it is a *feature*, and the scope decision recorded in
-`plano-semestre-outono-2026.md` freezes the engine at measurement — *"só o
-sweep de medições, sem features novas"*. The finding is the deliverable; the
-fix is out of scope.
+being built, because it is a *feature*, and the scope for this term freezes
+the engine at measurement: no new engine features, only the measurement
+sweep. The finding is the deliverable; the fix is out of scope. The same
+decision is why there is no WAL and no recovery (README → *Credit*).
 
 **Prediction, recorded for whoever does build it:** the pool removes ~36M of
 the 39.8M faults and returns ~58 s of the 179 s of system time (36.0M ×

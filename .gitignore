@@ -60,3 +60,6 @@ docs/superpowers/
 
 # build-config stamp: forces object rebuild when NOX_ENTRIES changes (Makefile)
 .entries-stamp
+
+# personal semester planning, not part of the engine
+plano-semestre-*.md
