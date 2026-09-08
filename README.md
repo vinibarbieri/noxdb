@@ -9,7 +9,7 @@
 
 > **Status: early and in active development.** This is a research/portfolio project built in public. The MVP is write-only and not production-ready. Interfaces and internals change cycle to cycle.
 >
-> **Follow the build:** I document the engineering process (benchmarks, bugs, and design trade-offs) in weekly threads on X: **[@ViniBarbieri_11](https://x.com/ViniBarbieri_11)**. See the [Roadmap](#roadmap) below for where it's headed.
+> **Follow the build:** I document the engineering process (benchmarks, bugs, and design trade-offs) in biweekly threads on X: **[@ViniBarbieri_11](https://x.com/ViniBarbieri_11)**. See the [Roadmap](#roadmap) below for where it's headed.
 
 ---
 
@@ -18,7 +18,7 @@
 On a modern PCIe NVMe SSD, the Linux **page cache** (the layer meant to make I/O fast) often becomes the ceiling. At millions of IOPS, the OS still funnels every write through the cache on the critical path. Three costs (the *PIO model*) scale **against** you as the drive gets faster:
 
 - **Over-buffering**: CPU burned copying data into the cache instead of exploiting raw sequential bandwidth.
-- **Concurrency limits**: a global kernel lock (XArray) chokes concurrent writers and starves the SSD's internal parallel channels.
+- **Concurrency limits**: kernel-side serialization chokes concurrent writers and starves the SSD's internal parallel channels. The literature names the page cache's XArray lock; on a single file the inode's `i_rwsem` is a second candidate, and **this repository has not yet separated the two**. See [`PERFORMANCE.md`](PERFORMANCE.md) §5 — it needs a profiler, not an assertion.
 - **Read-before-write**: a small, unaligned write forces a synchronous full-block read from disk before it can be modified.
 
 ## The approach
@@ -48,7 +48,7 @@ NoxDB **routes** writes instead of caching them. A thin router inspects each wri
 | **Flush** | Synchronous, cache-bypassed | Background **OTflush**: stage-1 fills holes via aligned `pread`, stage-2 drains full pages via `pwrite`/`pwritev` |
 | **Goal** | Saturate sequential bandwidth, zero CPU copy | Move read-before-write off the critical path; keep the SSD queue deep |
 
-The end goal is to serve as the storage backend for a **thin LSM key-value store**: an LSM produces exactly two write shapes, tiny WAL appends and large SSTable dumps, which map 1:1 onto the two paths.
+The two paths were chosen with a **thin LSM key-value store** in mind: an LSM produces exactly two write shapes, tiny WAL appends and large SSTable dumps, which map 1:1 onto them. That is the design argument for the router, and it is **deferred, unbuilt and therefore unmeasured** — see the [Roadmap](#roadmap).
 
 ## Repository layout
 
@@ -59,11 +59,17 @@ noxdb/
 ├── src/
 │   ├── noxdb.c            # engine + write router
 │   ├── io_direct.{c,h}    # O_DIRECT pread/pwrite primitives + EINVAL guard
-│   ├── scrap_page.{c,h}   # 256KB user-space buffer page (128B header + data zone)
-│   ├── page_index.{c,h}   # offset → active scrap-page map
+│   ├── scrap_page.{c,h}   # 256KB user-space buffer page (520B header + data zone)
+│   ├── page_index.{c,h}   # offset → active scrap-page map, 64 sharded buckets
+│   ├── otflush.{c,h}      # two-stage background flusher (stage-1 reads, stage-2 writes)
+│   ├── queue.{c,h}        # MPMC queue connecting the foreground to the stages
+│   ├── watermark.{c,h}    # RAM ceiling: throttles writers at N live scrap pages
+│   ├── nox_stats.{c,h}    # entry-exhaustion + write-amplification counters
 │   └── noxdb_config.h     # compile-time constants (block size, thresholds)
-├── bench/                 # benchmark harness + standalone O_DIRECT probe
+├── bench/                 # gates, soaks, repros, and the standalone O_DIRECT probe
+├── tools/                 # measurement harness: hygiene, fio sweep, report, overnight
 ├── docs/                  # architecture, POSIX constraints, PIO theory, design notes
+├── PERFORMANCE.md         # the measurement record
 ├── Makefile
 └── LICENSE
 ```
@@ -94,15 +100,26 @@ Benchmarks are run on a dedicated bare-metal box against a clean NVMe SSD mounte
 
 ## Roadmap
 
-- [x] **C0**: `O_DIRECT` alignment probe (prove the 4K constraint end-to-end)
-- [ ] **C1**: Fast path, large aligned writes straight to the SSD *(in progress)*
-- [ ] Scrap buffer + OTflush two-stage asynchronous flushing
-- [ ] Thin LSM key-value store (WAL + SSTable) on top of the engine
-- [ ] Evaluation vs. the page cache: throughput, p99 latency, CPU
+- [x] **C0** · `O_DIRECT` alignment probe — prove the 4K constraint end-to-end
+- [x] **C1** · Fast path — large aligned writes straight to the SSD
+- [x] **C2** · Scrap page + offset→page index
+- [x] **C3** · Concurrency — sharded index, TSan-clean, scaling gate
+- [x] **C4** · OTflush — two-stage async flushing, RAM watermark, 20-min soak
+- [ ] **C6** · Read path + `fsync`
+- [ ] **C10** · Evaluation against a page-cache baseline: throughput, p99, CPU
+- [ ] Thin LSM key-value store (WAL + SSTable) on top of the engine — deferred
+
+**Where the honesty is.** C0–C4 are built and gated, and the device's own
+ceiling is measured — but **no baseline exists yet**, so nothing in this
+repository is a comparison against the page cache. What is measured today is
+the device and the engine's own behaviour. [`PERFORMANCE.md`](PERFORMANCE.md)
+§5 states exactly which claims that does and does not support.
 
 ## Credit
 
-NoxDB is a **user-space** reimplementation of ideas from the **WSBuffer** paper (Zhan et al., *"Rearchitecting Buffered I/O in the Era of High-Bandwidth SSDs,"* USENIX FAST '26). WSBuffer is a Linux **kernel** filesystem module that delegates durability to the filesystem. NoxDB rebuilds its scrap-buffer and opportunistic two-stage flush mechanisms as a **standalone user-space engine over `O_DIRECT`**, with its own WAL-based recovery, as the backend of a thin LSM store. The paper is the conceptual seed; the user-space engine, the explicit LSM integration, and the recovery path are original work.
+NoxDB is a **user-space** reimplementation of ideas from the **WSBuffer** paper (Zhan et al., *"Rearchitecting Buffered I/O in the Era of High-Bandwidth SSDs,"* USENIX FAST '26). WSBuffer is a Linux **kernel** filesystem module that delegates durability to the filesystem. NoxDB rebuilds its scrap-buffer and opportunistic two-stage flush mechanisms as a **standalone user-space engine over `O_DIRECT`**. The paper is the conceptual seed; the user-space engine and its measurement record are original work.
+
+**Durability is out of scope, deliberately.** There is no WAL, no recovery and no transactions: a crash mid-flush loses whatever had not reached the device. The scope was frozen at the I/O path so the engine could be *measured* rather than left half-built in four directions.
 
 Paper: <https://www.usenix.org/conference/fast26/presentation/zhan>
 

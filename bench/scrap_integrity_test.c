@@ -15,8 +15,14 @@
  *     memcmp against the shadow.
  *
  * Zero-initialised shadow is correct: the backing file is unlinked first (fresh,
- * so holes read back as 0), scrap_page_alloc zeroes the data zone, and the
- * partial-flush read-before-write preserves untouched hole bytes.
+ * so holes read back as 0) and the partial-flush read-before-write preserves
+ * untouched hole bytes.
+ *
+ * It is NOT correct because the data zone starts zeroed -- scrap_page_alloc
+ * stopped zeroing it in C4 (see the DELIBERATELY NOT ZEROED comment there), and
+ * this line used to claim otherwise. The distinction matters to anyone changing
+ * the allocation strategy: what keeps a hole zero is that Stage-1 reads it back
+ * from a fresh file, not that the buffer arrived clean.
  *
  * Each case lives in its own 256KB region so a failure names the exact behaviour
  * that broke. Build + run ON THE BENCH BOX against /mnt/nvme (O_DIRECT only works

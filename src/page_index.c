@@ -123,9 +123,14 @@ scrap_page_t *page_index_get_or_create(page_index_t *idx, uint64_t base,
 
     for (scrap_page_t *p = idx->buckets[b]; p; p = p->next) {
         if (p->base == base) {
-            if (created) *created = 0;
+            /* LOCK COUPLING (spec §4.2): take the page lock BEFORE dropping the
+             * shard lock. Order is shard -> page, matching every other path, so
+             * no inversion; and no window exists in which another thread could
+             * detach + free this page between our lookup and our first use. */
+            pthread_mutex_lock(&p->lock);
             pthread_mutex_unlock(&sh->mtx);
-            return p;
+            if (created) *created = 0;
+            return p;                        /* p->lock HELD on return */
         }
     }
 
@@ -138,8 +143,11 @@ scrap_page_t *page_index_get_or_create(page_index_t *idx, uint64_t base,
     idx->buckets[b] = p;
     if (created) *created = 1;
 
+    /* Fresh page: nobody else can see it yet, but lock it anyway so the return
+     * contract is uniform — the caller always unlocks exactly once. */
+    pthread_mutex_lock(&p->lock);
     pthread_mutex_unlock(&sh->mtx);
-    return p;
+    return p;                                /* p->lock HELD on return */
 }
 
 void page_index_remove(page_index_t *idx, uint64_t base)
@@ -160,6 +168,26 @@ void page_index_remove(page_index_t *idx, uint64_t base)
         link = &(*link)->next;
     }
     pthread_mutex_unlock(&sh->mtx);
+}
+
+int page_index_detach_if(page_index_t *idx, uint64_t base, scrap_page_t *expect)
+{
+    uint32_t    b  = pi_hash(base);
+    pi_shard_t *sh = &idx->shards[pi_shard(b)];
+
+    pthread_mutex_lock(&sh->mtx);
+    scrap_page_t **link = &idx->buckets[b];
+    while (*link) {
+        if (*link == expect) {               /* identity, not just base equality */
+            *link = expect->next;
+            expect->next = NULL;
+            pthread_mutex_unlock(&sh->mtx);
+            return 1;                        /* caller now owns it; does NOT free */
+        }
+        link = &(*link)->next;
+    }
+    pthread_mutex_unlock(&sh->mtx);
+    return 0;
 }
 
 void page_index_foreach(page_index_t *idx,

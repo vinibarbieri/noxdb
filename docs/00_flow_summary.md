@@ -22,11 +22,11 @@ window = (offset / 256K) * 256K
 Ex: offset 500K → window [256K, 512K). A write **lands in** a grid cell; it does not create a window centered on it. There is no table of all windows — it's just the formula.
 
 **Scrap-page.** A RAM buffer bound to **one** window. Two components (doc 01):
-- **Header (128B):** bookkeeping metadata. Holds `counter`, `number`, `ssd_id`, `tag`, and **15 entries** (offset+size each). Lives in RAM, does not go to disk in the MVP.
+- **Header (520B):** bookkeeping metadata. Holds `counter`, `number`, `ssd_id`, `tag`, and **64 entries** (offset+size each). Lives in RAM, does not go to disk in the MVP. Size is derived (`8 + NOX_MAX_ENTRIES * 8`); WSBuffer's default is 15 entries / 128B, and `docs/01 §2.1` records why this engine sets 64.
 - **Data-zone (256KB):** the actual data. Allocated separately with `posix_memalign(..., 4096, 256*1024)` to satisfy O_DIRECT.
 
 **Segment vs Hole.**
-- **Segment** = a **filled** range of the data-zone (becomes one of the 15 entries). Adjacent ranges *merge* into a single entry.
+- **Segment** = a **filled** range of the data-zone (becomes one of the 64 entries). Adjacent ranges *merge* into a single entry, so sequential writes cost one entry no matter how many they are.
 - **Hole** = an **empty** range (no entry). It is untouched space in our own buffer — not another program's data.
 
 **Working set, not full mapping.** Disk may be 500GB, RAM 8GB. Only windows with an **active write right now** get a scrap-page in RAM. An index (hash) maps `disk_offset → scrap_page*` for active ones only. After a flush, the RAM is freed. It behaves like a cache: RAM holds the hot fraction and recycles.
@@ -66,7 +66,7 @@ If a write crosses a 256K boundary, it is **split** across 2 pages (neighboring 
 ### 3. Flush triggers
 A page is enqueued for flush when:
 1. **256KB full** (capacity).
-2. **15 entries used** (segments exhausted, even with little data).
+2. **64 entries used** (segments exhausted, even with little data).
 3. **Memory pressure** (force-flush old/full pages to free RAM).
 
 ## OTflush — two-stage flushing (background, pthreads)

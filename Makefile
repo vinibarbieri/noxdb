@@ -6,7 +6,48 @@
 
 CC      := cc
 CFLAGS  := -std=c11 -O2 -Wall -Wextra -Iinclude -Isrc
-LDFLAGS := -pthread
+LDFLAGS := -pthread -lm      # -lm for the gate's pow() in the latency CSV dump
+
+# Header-size knob (NOX_MAX_ENTRIES, src/noxdb_config.h). Folded into CFLAGS so
+# it reaches EVERY target, gates included — a gate number is only meaningful if
+# the binary was really built with the entry count the command line asked for.
+#   make gate-c4 NOX_ENTRIES=64
+NOX_ENTRIES ?=
+ENTRY_FLAGS := $(if $(NOX_ENTRIES),-DNOX_MAX_ENTRIES_OVERRIDE=$(NOX_ENTRIES))
+CFLAGS += $(ENTRY_FLAGS)
+
+# Soak-only knob (SHARED_BASES, bench/otflush_soak.c). Varies the OVERLAP RATIO,
+# not a tuning dial: 4 is the board's case. Bases actually used is
+# min(SOAK_THREADS, SOAK_BASES), so raising this above the thread count changes
+# NOTHING -- lower it instead to pack more threads onto each base.
+#   make soak-c4 SOAK_BASES=2 SOAK_SECONDS=60 SOAK_THREADS=16   # 8 threads/base
+SOAK_BASES ?=
+SOAK_FLAGS := $(if $(SOAK_BASES),-DSHARED_BASES=$(SOAK_BASES)u)
+CFLAGS += $(SOAK_FLAGS)
+
+# Soak-only knob (SOAK_MAXLEN, bench/otflush_soak.c). Sets the write-size
+# distribution, which is what decides write amplification -- the crossover is
+# NOX_DATAZONE_SIZE/NOX_MAX_ENTRIES = 4096 B at a 64-entry header, and each
+# write is 1 + rand()%SOAK_MAXLEN so the MEAN is about half this value.
+#   make soak-c4 SOAK_MAXLEN=8192       # mean ~4KB, at the crossover
+SOAK_MAXLEN ?=
+CFLAGS += $(if $(SOAK_MAXLEN),-DSOAK_MAXLEN=$(SOAK_MAXLEN)u)
+
+# Soak-only knob (RSS_SAMPLE_INTERVAL_S, bench/otflush_soak.c). 5s is right for
+# a 20-minute run; use 1 to draw an RSS curve of a run that dies in seconds.
+#   make soak-c4 RSS_INTERVAL=1
+RSS_INTERVAL ?=
+CFLAGS += $(if $(RSS_INTERVAL),-DRSS_SAMPLE_INTERVAL_S=$(RSS_INTERVAL)u)
+
+# Backpressure knob (NOX_WATERMARK_HIGH, src/noxdb_config.h). The low mark
+# follows at 3/4 unless NOX_WATERMARK_LOW is given too. Set it past any reachable
+# depth to build the "before" binary with the gate effectively disarmed, with
+# every other line of the engine identical:
+#   make soak-c4 NOX_WATERMARK=1000000000 SOAK_SECONDS=30 RSS_INTERVAL=1
+NOX_WATERMARK ?=
+NOX_WATERMARK_LOW ?=
+CFLAGS += $(if $(NOX_WATERMARK),-DNOX_WATERMARK_HIGH_OVERRIDE=$(NOX_WATERMARK)u)
+CFLAGS += $(if $(NOX_WATERMARK_LOW),-DNOX_WATERMARK_LOW_OVERRIDE=$(NOX_WATERMARK_LOW)u)
 
 SRC   := $(wildcard src/*.c)
 OBJ   := $(SRC:.c=.o)
@@ -14,6 +55,8 @@ BENCH := bench/benchmark
 PROBE := bench/o_direct_probe
 GATE  := bench/scrap_integrity_test
 GATE_C3 := bench/concurrency_test
+GATE_C4 := bench/otflush_test
+GATE_C4_SOAK := bench/otflush_soak
 
 REMOTE     ?= noxdb
 REMOTE_DIR ?= ~/noxdb
@@ -23,7 +66,19 @@ all: $(BENCH)
 $(BENCH): $(OBJ) bench/benchmark.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-%.o: %.c
+# Object files bake the header size in, and make cannot see that a -D changed:
+# `make gate-c4 NOX_ENTRIES=64` would relink 15-entry objects and print a
+# "64-entry" result that is nothing of the sort. This stamp records EVERY -D
+# knob's current value and forces a rebuild whenever any of them moves. Add new
+# knobs here too, or they inherit exactly the bug this exists to prevent.
+STAMP_KNOBS := $(NOX_ENTRIES)|$(SOAK_BASES)|$(SOAK_MAXLEN)|$(RSS_INTERVAL)|$(NOX_WATERMARK)|$(NOX_WATERMARK_LOW)
+
+.entries-stamp: FORCE
+	@echo '$(STAMP_KNOBS)' | cmp -s - $@ 2>/dev/null || \
+	    echo '$(STAMP_KNOBS)' > $@
+FORCE:
+
+%.o: %.c .entries-stamp
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 bench: $(BENCH)
@@ -49,6 +104,119 @@ gate-c3-tsan:
 	$(CC) $(CFLAGS) -fsanitize=thread -g -o bench/concurrency_test_tsan \
 	    $(SRC) bench/concurrency_test.c $(LDFLAGS)
 
+# C4 acceptance gate: async two-stage flushing. Bench box only.
+# Run: ./bench/otflush_test /mnt/nvme/c4gate.dat 8
+gate-c4: $(GATE_C4)
+
+$(GATE_C4): $(OBJ) bench/otflush_test.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# C4 "before" build: identical tree, one #ifdef apart, with the eager 256KB
+# memset put back in scrap_page_alloc. Measurement artifact only - this is the
+# binary that produces the BEFORE curve of the thread-05 latency CDF. Compiled
+# from sources in one shot (not from $(OBJ)) so the -DNOX_EAGER_ZERO objects can
+# never be linked into a real gate binary by a stale .o.
+# Run: NOX_LAT_CSV=before.csv ./bench/otflush_test_zero /mnt/nvme/c4gate.dat 8
+gate-c4-zero:
+	$(CC) $(CFLAGS) -DNOX_EAGER_ZERO -o bench/otflush_test_zero \
+	    $(SRC) bench/otflush_test.c $(LDFLAGS)
+
+# C4 write-ordering repro (bench/order_repro.c). TWO builds, and the pair is the
+# experiment — neither half means anything alone:
+#
+#   make repro-order        && ./bench/order_repro       /mnt/nvme/order.dat
+#   make repro-order-multi  && ./bench/order_repro_multi /mnt/nvme/order.dat
+#
+# The first must PASS and the second must FAIL. A PASS from the first alone
+# cannot distinguish "ordering held" from "the hazard was never created"; the
+# second build is the control that proves the workload reaches it.
+#
+# Compiled from $(SRC) in one shot, never from $(OBJ), so -DNOX_REPRO_* and the
+# thread override can never be linked into a gate binary by a stale .o — the
+# same containment gate-c4-zero uses. For that reason these knobs are also
+# deliberately ABSENT from STAMP_KNOBS: the stamp exists to catch -D changes
+# leaking through cached objects, and these targets cache nothing.
+# THE TWO BUILDS NEED DIFFERENT AMPLIFIERS, and the 2026-08-20 run is why:
+# repro-order-multi first shipped with the Stage-1 stall and returned PASS where
+# FAIL was predicted. Stalling Stage-1 throttles the PRODUCER, so Q2 holds one
+# page at a time and the Stage-2 threads never contend over two generations of
+# one base. The hook meant to open the window closed it.
+#
+#   repro-order        stalls STAGE-1: stacks generations of a base while the
+#                      single Stage-2 thread drains them, testing whether FIFO
+#                      order survives. Producer-side pressure is the right
+#                      amplifier here because the consumer is the invariant.
+#   repro-order-multi  jitters STAGE-2: pages pile up in Q2, several generations
+#                      become claimable at once, and the random delay decides
+#                      which thread reaches its pwrite first. Stage-1 is left at
+#                      full speed on purpose -- it must FEED the queue.
+REPRO_STALL   ?= 20     # ms Stage-1 sleeps per page (repro-order)
+REPRO_STALL2  ?= 5      # max ms of random Stage-2 jitter (repro-order-multi)
+REPRO_STAGE2  ?= 4      # Stage-2 threads in the deliberately-broken build
+
+repro-order:
+	$(CC) $(CFLAGS) -DNOX_REPRO_STALL_STAGE1_MS=$(REPRO_STALL) \
+	    -o bench/order_repro $(SRC) bench/order_repro.c $(LDFLAGS)
+
+repro-order-multi:
+	$(CC) $(CFLAGS) -DNOX_REPRO_STALL_STAGE2_MS=$(REPRO_STALL2) \
+	    -DNOX_STAGE2_THREADS_OVERRIDE=$(REPRO_STAGE2) \
+	    -o bench/order_repro_multi $(SRC) bench/order_repro.c $(LDFLAGS)
+
+# Entry-count + write-amplification study (src/nox_stats.h).
+#
+# WSBuffer justifies its 15 index entries with a measurement — "less than 15 in
+# more than 95% cases" — and says outright that the 128B header is a DEFAULT and
+# that small-write workloads want a larger one. These targets re-run that
+# experiment on this engine, so NOX_HEADER_SIZE gets chosen from our own data
+# instead of from intuition.
+#
+# SEPARATE BINARIES ON PURPOSE. The counters sit on the foreground write path,
+# and this cycle's entire claim is a latency distribution; an atomic increment
+# per write would perturb the number the gate exists to defend. A stats build is
+# never a gate build.
+#
+# Sweep the header size without editing a file:
+#   make stats-c4 NOX_ENTRIES=15  && ./bench/otflush_test_stats /mnt/nvme/c4gate.dat 8
+#   make stats-c4 NOX_ENTRIES=63  && ./bench/otflush_test_stats /mnt/nvme/c4gate.dat 8
+#   make stats-c4 NOX_ENTRIES=255 && ./bench/otflush_test_stats /mnt/nvme/c4gate.dat 8
+# 255 is the hard ceiling: WSBuffer's `number` field is 1 byte.
+# NOX_ENTRIES itself is handled up top (ENTRY_FLAGS, folded into CFLAGS).
+STATS_FLAGS := -DNOX_STATS
+
+stats-c4:
+	$(CC) $(CFLAGS) $(STATS_FLAGS) -o bench/otflush_test_stats \
+	    $(SRC) bench/otflush_test.c $(LDFLAGS)
+
+stats-soak:
+	$(CC) $(CFLAGS) $(STATS_FLAGS) -o bench/otflush_soak_stats \
+	    $(SRC) bench/otflush_soak.c $(LDFLAGS)
+
+# C4 race gate: single instrumented compile, TSan objects never mixed with -O2.
+# Run: ./bench/otflush_test_tsan /mnt/nvme/c4gate.dat 4
+gate-c4-tsan:
+	$(CC) $(CFLAGS) -fsanitize=thread -g -o bench/otflush_test_tsan \
+	    $(SRC) bench/otflush_test.c $(LDFLAGS)
+
+# C4-B6 addendum / C4-G7 (.dev/KANBAN.md): >=20min soak with OVERLAPPING
+# 256KB bases (many threads share one page_index slot/page-lock/queue slot -
+# the case gate-c3/gate-c4 deliberately partition away from), sampling both
+# memcmp integrity and RSS over time. See bench/otflush_soak.c's header for
+# why a FAIL here on integrity or RSS alone is a documented, expected C5-core
+# gap (board cards C4-B8/C4-B9), not a mystery bug.
+# Defaults: 20 min / 16 threads against /mnt/nvme/c4soak.dat. Override for a
+# short smoke run, e.g.:
+#   make soak-c4 SOAK_SECONDS=30 SOAK_THREADS=4
+SOAK_SECONDS ?= 1200
+SOAK_THREADS ?= 16
+SOAK_PATH    ?= /mnt/nvme/c4soak.dat
+
+soak-c4: $(GATE_C4_SOAK)
+	./$(GATE_C4_SOAK) $(SOAK_PATH) $(SOAK_SECONDS) $(SOAK_THREADS)
+
+$(GATE_C4_SOAK): $(OBJ) bench/otflush_soak.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 # C4-S2 study toy: unbounded MPMC queue (mutex + condvar), 4 prod / 4 cons.
 # Pure RAM, no O_DIRECT: runs on the laptop. Standalone, no engine objects.
 toy-pc: bench/pc_queue_toy.c
@@ -73,17 +241,51 @@ probe: $(PROBE)
 $(PROBE): bench/o_direct_probe.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# --- Local unit tests (RAM only, no O_DIRECT) -------------------------------
+# These are the ONLY targets that may be run on the dev laptop. Everything else
+# needs the bench box.
+test-queue:
+	$(CC) $(CFLAGS) -o bench/queue_test src/queue.c bench/queue_test.c $(LDFLAGS)
+	./bench/queue_test
+
+test-queue-tsan:
+	$(CC) $(CFLAGS) -fsanitize=thread -g -o bench/queue_test_tsan \
+	    src/queue.c bench/queue_test.c $(LDFLAGS)
+	./bench/queue_test_tsan
+
+test-holes:
+	$(CC) $(CFLAGS) -o bench/holes_test src/scrap_page.c src/watermark.c bench/holes_test.c $(LDFLAGS)
+	./bench/holes_test
+
+test-watermark:
+	$(CC) $(CFLAGS) -o bench/watermark_test src/watermark.c bench/watermark_test.c $(LDFLAGS)
+	./bench/watermark_test
+
+test-watermark-tsan:
+	$(CC) $(CFLAGS) -fsanitize=thread -g -o bench/watermark_test_tsan \
+	    src/watermark.c bench/watermark_test.c $(LDFLAGS)
+	./bench/watermark_test_tsan
+
 # Sync only source/build files to the bench box (rsync, key auth, host alias).
 deploy:
 	rsync -avz -m \
 	    --exclude='.git' \
 	    --include='*/' \
 	    --include='*.c' --include='*.h' --include='Makefile' \
+	    --include='*.sh' --include='*.py' \
 	    --exclude='*' \
 	    ./ $(REMOTE):$(REMOTE_DIR)/
 
 clean:
 	rm -f src/*.o bench/*.o $(BENCH) $(PROBE) $(GATE) $(GATE_C3) bench/concurrency_test_tsan \
-	    bench/pc_queue_toy bench/pc_queue_toy_tsan bench/pwritev_toy
+	    $(GATE_C4) bench/otflush_test_tsan bench/otflush_test_zero $(GATE_C4_SOAK) \
+	    bench/pc_queue_toy bench/pc_queue_toy_tsan bench/pwritev_toy \
+	    bench/queue_test bench/queue_test_tsan bench/holes_test \
+	    bench/watermark_test bench/watermark_test_tsan \
+	    bench/otflush_test_stats bench/otflush_soak_stats \
+	    bench/order_repro bench/order_repro_multi .entries-stamp
 
-.PHONY: all bench probe gate gate-c3 gate-c3-tsan toy-pc toy-pc-tsan toy-pwritev deploy clean
+.PHONY: FORCE all bench probe gate gate-c3 gate-c3-tsan gate-c4 gate-c4-tsan \
+    gate-c4-zero soak-c4 stats-c4 stats-soak repro-order repro-order-multi \
+    toy-pc toy-pc-tsan toy-pwritev deploy clean \
+    test-queue test-queue-tsan test-holes test-watermark test-watermark-tsan

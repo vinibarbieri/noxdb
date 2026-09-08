@@ -49,7 +49,7 @@ Large write requests (≥ 1 MB) that are perfectly aligned to the logical block 
 
 Small or unaligned writes are instantly routed to a custom **user-space RAM structure**, eliminating the synchronous read-before-write OS penalty.
 
-> **NoxDB Layout:** Each `scrap_page_t` has a **128-byte header** (tracking valid bytes, segments, and tags) and a **256 KB data-zone**. The data-zone is allocated separately to preserve 4096-byte `O_DIRECT` alignment.
+> **NoxDB Layout:** Each `scrap_page_t` has a **520-byte header** (tracking valid bytes, segments, and tags across 64 index entries) and a **256 KB data-zone**. The data-zone is allocated separately to preserve 4096-byte `O_DIRECT` alignment. The header size is derived from the entry count — WSBuffer's default is 128 B / 15 entries, and `docs/01 §2.1` records the measurements behind this engine's 64.
 
 ### 3.3. Opportunistic Two-Stage Flushing (OTflush) & Concurrency
 
