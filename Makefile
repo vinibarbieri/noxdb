@@ -121,6 +121,48 @@ gate-c4-zero:
 	$(CC) $(CFLAGS) -DNOX_EAGER_ZERO -o bench/otflush_test_zero \
 	    $(SRC) bench/otflush_test.c $(LDFLAGS)
 
+# C4 write-ordering repro (bench/order_repro.c). TWO builds, and the pair is the
+# experiment — neither half means anything alone:
+#
+#   make repro-order        && ./bench/order_repro       /mnt/nvme/order.dat
+#   make repro-order-multi  && ./bench/order_repro_multi /mnt/nvme/order.dat
+#
+# The first must PASS and the second must FAIL. A PASS from the first alone
+# cannot distinguish "ordering held" from "the hazard was never created"; the
+# second build is the control that proves the workload reaches it.
+#
+# Compiled from $(SRC) in one shot, never from $(OBJ), so -DNOX_REPRO_* and the
+# thread override can never be linked into a gate binary by a stale .o — the
+# same containment gate-c4-zero uses. For that reason these knobs are also
+# deliberately ABSENT from STAMP_KNOBS: the stamp exists to catch -D changes
+# leaking through cached objects, and these targets cache nothing.
+# THE TWO BUILDS NEED DIFFERENT AMPLIFIERS, and the 2026-08-20 run is why:
+# repro-order-multi first shipped with the Stage-1 stall and returned PASS where
+# FAIL was predicted. Stalling Stage-1 throttles the PRODUCER, so Q2 holds one
+# page at a time and the Stage-2 threads never contend over two generations of
+# one base. The hook meant to open the window closed it.
+#
+#   repro-order        stalls STAGE-1: stacks generations of a base while the
+#                      single Stage-2 thread drains them, testing whether FIFO
+#                      order survives. Producer-side pressure is the right
+#                      amplifier here because the consumer is the invariant.
+#   repro-order-multi  jitters STAGE-2: pages pile up in Q2, several generations
+#                      become claimable at once, and the random delay decides
+#                      which thread reaches its pwrite first. Stage-1 is left at
+#                      full speed on purpose -- it must FEED the queue.
+REPRO_STALL   ?= 20     # ms Stage-1 sleeps per page (repro-order)
+REPRO_STALL2  ?= 5      # max ms of random Stage-2 jitter (repro-order-multi)
+REPRO_STAGE2  ?= 4      # Stage-2 threads in the deliberately-broken build
+
+repro-order:
+	$(CC) $(CFLAGS) -DNOX_REPRO_STALL_STAGE1_MS=$(REPRO_STALL) \
+	    -o bench/order_repro $(SRC) bench/order_repro.c $(LDFLAGS)
+
+repro-order-multi:
+	$(CC) $(CFLAGS) -DNOX_REPRO_STALL_STAGE2_MS=$(REPRO_STALL2) \
+	    -DNOX_STAGE2_THREADS_OVERRIDE=$(REPRO_STAGE2) \
+	    -o bench/order_repro_multi $(SRC) bench/order_repro.c $(LDFLAGS)
+
 # Entry-count + write-amplification study (src/nox_stats.h).
 #
 # WSBuffer justifies its 15 index entries with a measurement — "less than 15 in
@@ -230,6 +272,7 @@ deploy:
 	    --exclude='.git' \
 	    --include='*/' \
 	    --include='*.c' --include='*.h' --include='Makefile' \
+	    --include='*.sh' --include='*.py' \
 	    --exclude='*' \
 	    ./ $(REMOTE):$(REMOTE_DIR)/
 
@@ -239,9 +282,10 @@ clean:
 	    bench/pc_queue_toy bench/pc_queue_toy_tsan bench/pwritev_toy \
 	    bench/queue_test bench/queue_test_tsan bench/holes_test \
 	    bench/watermark_test bench/watermark_test_tsan \
-	    bench/otflush_test_stats bench/otflush_soak_stats .entries-stamp
+	    bench/otflush_test_stats bench/otflush_soak_stats \
+	    bench/order_repro bench/order_repro_multi .entries-stamp
 
 .PHONY: FORCE all bench probe gate gate-c3 gate-c3-tsan gate-c4 gate-c4-tsan \
-    gate-c4-zero soak-c4 stats-c4 stats-soak \
+    gate-c4-zero soak-c4 stats-c4 stats-soak repro-order repro-order-multi \
     toy-pc toy-pc-tsan toy-pwritev deploy clean \
     test-queue test-queue-tsan test-holes test-watermark test-watermark-tsan

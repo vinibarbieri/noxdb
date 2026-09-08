@@ -223,13 +223,31 @@ static void warn_if_deep(otflush_t *o, nox_queue_t *q, const char *name)
     if (atomic_flag_test_and_set(&o->deep_noticed))
         return;
 
-    fprintf(stderr,
-            "noxdb: NOTE: OTflush %s reached %zu pages (~%zu MB of scrap RAM). "
-            "The foreground is outrunning the flush threads, so the C4-B9 "
-            "watermark is now throttling writers at %u live pages; expect "
-            "foreground stalls in the latency tail. Reported once per engine.\n",
-            name, d, (d * (size_t)NOX_DATAZONE_SIZE) >> 20,
-            NOX_WATERMARK_HIGH);
+    /* Whether the gate can actually bind is a BUILD question, so the notice has
+     * to ask it rather than assume. NOX_WATERMARK_HIGH is overridable, and the
+     * before/after measurement builds set it past any reachable depth precisely
+     * to disarm the gate (see noxdb_config.h). On that build the old wording -
+     * "the watermark is now throttling writers at 1000000000 live pages" - was
+     * exactly the class of lie this function was just rewritten to remove.
+     *
+     * Comparing against the depth we just crossed is the right test: the queue
+     * holds live pages, so a mark at or below this depth is a mark that binds. */
+    if ((size_t)NOX_WATERMARK_HIGH <= d)
+        fprintf(stderr,
+                "noxdb: NOTE: OTflush %s reached %zu pages (~%zu MB of scrap "
+                "RAM). The foreground is outrunning the flush threads, so the "
+                "C4-B9 watermark is throttling writers at %u live pages; expect "
+                "foreground stalls in the latency tail. Once per engine.\n",
+                name, d, (d * (size_t)NOX_DATAZONE_SIZE) >> 20,
+                NOX_WATERMARK_HIGH);
+    else
+        fprintf(stderr,
+                "noxdb: WARNING: OTflush %s reached %zu pages (~%zu MB of scrap "
+                "RAM) and NOTHING IS BOUNDING IT: the C4-B9 watermark is set to "
+                "%u live pages, which this workload will not reach. RAM will grow "
+                "until the OOM killer intervenes. Once per engine.\n",
+                name, d, (d * (size_t)NOX_DATAZONE_SIZE) >> 20,
+                NOX_WATERMARK_HIGH);
 }
 
 void otflush_enqueue_partial(otflush_t *o, scrap_page_t *p)
@@ -274,6 +292,30 @@ static void *stage1_loop(void *arg)
     }
 
     while ((p = nox_queue_pop(o->q1)) != NULL) {
+        /* REPRO HOOK -- measurement artifact only, never a real build.
+         *
+         * bench/order_repro.c needs SEVERAL live generations of one base to
+         * exist at the same instant, which only happens while Stage-1 is behind
+         * the foreground. On an idle engine Stage-1 drains a page the moment it
+         * is pushed and the window never opens, so the experiment would report a
+         * PASS that means "I never created the condition" rather than "the
+         * ordering held". Sleeping here holds each popped page out of both
+         * queues for a known interval and lets the foreground stack generations
+         * behind it.
+         *
+         * Same containment as NOX_EAGER_ZERO (see scrap_page_alloc): defined
+         * only by the repro targets, which compile $(SRC) in one shot so the -O2
+         * objects a gate links can never carry it. Inert -- not merely cheap --
+         * in every other build: the #ifdef removes the code entirely. */
+#ifdef NOX_REPRO_STALL_STAGE1_MS
+        {
+            struct timespec st = {
+                .tv_sec  =  (time_t)(NOX_REPRO_STALL_STAGE1_MS) / 1000,
+                .tv_nsec = ((long)(NOX_REPRO_STALL_STAGE1_MS) % 1000) * 1000000L
+            };
+            nanosleep(&st, NULL);
+        }
+#endif
         pthread_mutex_lock(&p->lock);
 
         /* Alg. 2 line 4-5 discards a full page because the foreground already
@@ -414,7 +456,37 @@ static void *stage2_loop(void *arg)
     scrap_page_t *batch[NOX_PWRITEV_MAX_IOV];
     struct iovec  iov[NOX_PWRITEV_MAX_IOV];
 
+    /* Per-thread PRNG state for the repro jitter below. Seeded from the thread's
+     * own stack address so the Stage-2 threads do not all draw the same
+     * sequence, which would re-serialise exactly what the jitter exists to
+     * scramble. Unused (and untouched) in a normal build. */
+    unsigned repro_seed = (unsigned)(uintptr_t)&p;
+    (void)repro_seed;
+
     while ((p = nox_queue_pop(o->q2)) != NULL) {
+        /* REPRO HOOK -- measurement artifact only, never a real build. See the
+         * matching hook in stage1_loop for the containment argument.
+         *
+         * WHY THIS ONE EXISTS: the Stage-1 hook was the wrong amplifier for the
+         * Stage-2 reordering hazard, and the 2026-08-20 run proved it. Stalling
+         * Stage-1 throttles the PRODUCER, so Q2 receives one page at a time and
+         * the Stage-2 threads never hold two pages of one base concurrently --
+         * the window the experiment needs was closed by the very hook meant to
+         * open it (predicted FAIL, measured PASS, exit 0).
+         *
+         * Stalling the CONSUMER is the correct amplifier: pages pile up in Q2,
+         * several generations of one base become claimable at once, and the
+         * jitter decides which thread reaches its pwrite first. RANDOM, not
+         * fixed: a uniform sleep delays all four threads equally and preserves
+         * their pop order, which is the ordering under test. */
+#ifdef NOX_REPRO_STALL_STAGE2_MS
+        {
+            long ms = (long)(rand_r(&repro_seed) % ((NOX_REPRO_STALL_STAGE2_MS) + 1));
+            struct timespec st = { .tv_sec  = ms / 1000,
+                                   .tv_nsec = (ms % 1000) * 1000000L };
+            nanosleep(&st, NULL);
+        }
+#endif
         /* Alg. 2 line 20: defer to a later slot if the SSD is saturated. */
         if (ssd_is_busy(o)) {
             nox_queue_push(o->q2, p);      /* Alg. 2 lines 23-24 */

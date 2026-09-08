@@ -113,8 +113,37 @@
  * data zones (see scrap_page_alloc), those faults land on this one thread and
  * C4-GATE end-to-end went 2.89 s -> 4.20 s. Latency was bought with throughput
  * deliberately; the throughput comes back in C5. */
+
+/*
+ * OVERRIDABLE FROM THE BUILD, same convention as NOX_MAX_ENTRIES_OVERRIDE.
+ *
+ * This is NOT a tuning dial and raising it is NOT supported for any build whose
+ * output is a gate result or a published number. It exists for exactly one
+ * purpose: bench/order_repro.c has to be able to BUILD the broken configuration
+ * in order to demonstrate that the paragraph above is a measured fact rather
+ * than an assertion. Both halves of the claim need evidence --
+ *
+ *   make repro-order        -> 1 Stage-2 thread, ordering must HOLD
+ *   make repro-order-multi  -> 4 Stage-2 threads, ordering must BREAK
+ *
+ * -- and without an override the second build requires editing this file, which
+ * is precisely how a "temporary" edit ends up in a measurement binary.
+ *
+ * The dormancy argument depends on BOTH staying 1; see the two paragraphs
+ * above for why each one does, and note they fail differently (Stage-2 reorders
+ * writebacks, Stage-1 reorders hole fills).
+ */
+#ifdef NOX_STAGE1_THREADS_OVERRIDE
+#define NOX_STAGE1_THREADS   ((uint32_t)(NOX_STAGE1_THREADS_OVERRIDE))
+#else
 #define NOX_STAGE1_THREADS   1u
+#endif
+
+#ifdef NOX_STAGE2_THREADS_OVERRIDE
+#define NOX_STAGE2_THREADS   ((uint32_t)(NOX_STAGE2_THREADS_OVERRIDE))
+#else
 #define NOX_STAGE2_THREADS   1u
+#endif
 
 /* "SSD is busy" threshold for Bcount, the count of BYTES of in-flight I/O
  * (paper §3.4). 4MB is the paper's evaluation default, on the grounds that a
