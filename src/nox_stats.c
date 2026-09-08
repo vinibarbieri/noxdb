@@ -34,6 +34,10 @@ static _Atomic uint64_t s_disk_read;
 static _Atomic uint64_t s_hist_stage1[NOX_MAX_ENTRIES + 1];
 static _Atomic uint64_t s_hist_full[NOX_MAX_ENTRIES + 1];
 
+/* Pages per Stage-2 writeback. Index 0 is unused; a writeback always covers at
+ * least one page. Bounded by the iovec cap, so it is a short histogram. */
+static _Atomic uint64_t s_hist_batch[NOX_PWRITEV_MAX_IOV + 1];
+
 static inline void bump(_Atomic uint64_t *c, uint64_t n)
 {
     atomic_fetch_add_explicit(c, n, memory_order_relaxed);
@@ -50,6 +54,16 @@ void nox_stat_page_full(uint32_t entries)
     bump(&s_pages_full, 1);
     if (entries <= NOX_MAX_ENTRIES)
         bump(&s_hist_full[entries], 1);
+}
+
+void nox_stat_stage2_batch(uint32_t n)
+{
+    /* Clamp rather than drop: a sample outside the cap would mean
+     * stage2_collect overran its batch array, and silently discarding it would
+     * hide that. Bucketing it at the cap keeps it visible in the report. */
+    if (n > NOX_PWRITEV_MAX_IOV)
+        n = NOX_PWRITEV_MAX_IOV;
+    bump(&s_hist_batch[n], 1);
 }
 
 void nox_stat_entries_at_stage1(uint32_t entries)
@@ -70,6 +84,8 @@ void nox_stats_reset(void)
         atomic_store_explicit(&s_hist_stage1[i], 0, memory_order_relaxed);
         atomic_store_explicit(&s_hist_full[i],   0, memory_order_relaxed);
     }
+    for (uint32_t i = 0; i <= NOX_PWRITEV_MAX_IOV; i++)
+        atomic_store_explicit(&s_hist_batch[i], 0, memory_order_relaxed);
 }
 
 static uint64_t ld(const _Atomic uint64_t *c)
@@ -77,22 +93,22 @@ static uint64_t ld(const _Atomic uint64_t *c)
     return atomic_load_explicit(c, memory_order_relaxed);
 }
 
-static void print_hist(FILE *out, const char *label,
-                       const _Atomic uint64_t *h, uint64_t total)
+static void print_hist(FILE *out, const char *label, const char *unit,
+                       const _Atomic uint64_t *h, uint32_t upto, uint64_t total)
 {
     if (total == 0) {
         fprintf(out, "  %s: no samples\n", label);
         return;
     }
-    fprintf(out, "  %s (%llu pages):\n", label, (unsigned long long)total);
-    for (uint32_t i = 0; i <= NOX_MAX_ENTRIES; i++) {
+    fprintf(out, "  %s (%llu samples):\n", label, (unsigned long long)total);
+    for (uint32_t i = 0; i <= upto; i++) {
         uint64_t v = ld(&h[i]);
         if (v == 0)
             continue;
         double pct = 100.0 * (double)v / (double)total;
         /* Bar is capped at 40 columns; the percentage is the real datum. */
         int bars = (int)(pct * 0.4);
-        fprintf(out, "    %3u entries  %10llu  %5.1f%%  ", i,
+        fprintf(out, "    %3u %-8s %10llu  %5.1f%%  ", i, unit,
                 (unsigned long long)v, pct);
         for (int b = 0; b < bars; b++)
             fputc('#', out);
@@ -172,13 +188,36 @@ void nox_stats_dump(FILE *out)
     }
 
     fputc('\n', out);
-    uint64_t t1 = 0, t2 = 0;
+    uint64_t t1 = 0, t2 = 0, t3 = 0;
     for (uint32_t i = 0; i <= NOX_MAX_ENTRIES; i++) {
         t1 += ld(&s_hist_stage1[i]);
         t2 += ld(&s_hist_full[i]);
     }
-    print_hist(out, "entries in use when Stage-1 took the page", s_hist_stage1, t1);
-    print_hist(out, "entries needed to reach a full 256KB page", s_hist_full, t2);
+    for (uint32_t i = 0; i <= NOX_PWRITEV_MAX_IOV; i++)
+        t3 += ld(&s_hist_batch[i]);
+
+    print_hist(out, "entries in use when Stage-1 took the page", "entries",
+               s_hist_stage1, NOX_MAX_ENTRIES, t1);
+    print_hist(out, "entries needed to reach a full 256KB page", "entries",
+               s_hist_full, NOX_MAX_ENTRIES, t2);
+
+    /* The question this answers: does the pwritev batch EVER form? If bucket 1
+     * holds essentially every sample, NOX_PWRITEV_MAX_IOV is inert and raising
+     * it changes nothing -- the binding constraint is base adjacency in Q2, not
+     * the iovec cap. Print the concentration explicitly so the answer does not
+     * depend on reading a histogram correctly. */
+    print_hist(out, "pages coalesced into one Stage-2 writeback", "pages",
+               s_hist_batch, NOX_PWRITEV_MAX_IOV, t3);
+    if (t3 > 0) {
+        uint64_t singles = ld(&s_hist_batch[1]);
+        uint64_t pages = 0;
+        for (uint32_t i = 0; i <= NOX_PWRITEV_MAX_IOV; i++)
+            pages += (uint64_t)i * ld(&s_hist_batch[i]);
+        fprintf(out, "  batch never formed (n == 1): %.2f%% of writebacks;"
+                     " mean %.2f pages/syscall (cap %u)\n",
+                100.0 * (double)singles / (double)t3,
+                (double)pages / (double)t3, NOX_PWRITEV_MAX_IOV);
+    }
     fprintf(out, "===================================\n\n");
 }
 

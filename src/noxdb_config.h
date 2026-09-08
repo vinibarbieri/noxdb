@@ -173,7 +173,32 @@
  * exercised once that is fixed. */
 #define NOX_BCOUNT_BUSY_THRESHOLD (4u << 20)   /* 4 MB */
 
-/* Max iovecs per Stage-2 pwritev: 8 * 256KB = 2MB per syscall (docs/02 §2). */
+/* Max iovecs per Stage-2 pwritev: 8 * 256KB = 2MB per syscall (docs/02 §2).
+ *
+ * HONEST NOTE (2026-09-08): 8 IS NOT DERIVED FROM ANYTHING. docs/02 §3 says to
+ * use pwritev; it does not say how wide. No measurement chose this number, and
+ * nothing in the repository justifies it. It is recorded as a choice so that
+ * nobody defends it as a result.
+ *
+ * What actually bounds the useful width, in the order that binds:
+ *
+ *  1. ADJACENCY, and it binds first. stage2_collect only extends a batch with
+ *     pages whose bases are CONTIGUOUS and already sitting in Q2. On a random
+ *     workload the batch is almost certainly n == 1, in which case this constant
+ *     is inert no matter what it is set to. THIS IS UNMEASURED -- see
+ *     nox_stat_stage2_batch, added to settle it. Measure before tuning.
+ *  2. The block layer splits anyway. max_sectors_kb is 128 on the bench box, so
+ *     a 2MB pwritev becomes ~16 device requests; measured wareq-sz 121.2 KiB
+ *     (PERFORMANCE.md §4.6). A wider batch does NOT produce a wider device
+ *     request. The only thing it buys is fewer syscalls -- which is worth
+ *     something here, because §4.6 measures 3:1 sys:user, but it is a
+ *     second-order win and not the one the constant looks like it is making.
+ *  3. IOV_MAX (1024 on Linux) is the hard ceiling and is nowhere near binding.
+ *
+ * Raising it also raises the Stage-2 arm of the Bcount ceiling (see
+ * NOX_BCOUNT_BUSY_THRESHOLD above): at 16 it would be 4MB and ssd_is_busy would
+ * become reachable with a single Stage-2 thread for the first time. That is a
+ * behaviour change, not a tuning change, and it arms the tail re-push. */
 #define NOX_PWRITEV_MAX_IOV  8u
 
 /* Soft warning threshold on queue depth. Warns on stderr, NEVER blocks — this

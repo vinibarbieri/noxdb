@@ -499,6 +499,12 @@ static void *stage2_loop(void *arg)
          * owns the offset, so p->base is known at allocation (spec §3, D2). */
 
         uint32_t n = stage2_collect(o, p, batch);
+        /* Sampled here, once per writeback, BEFORE the branch below splits the
+         * n == 1 and n > 1 cases -- otherwise the single-page path (which is the
+         * one we suspect dominates) would have to be counted separately and the
+         * two could drift apart. Background thread, so this costs the foreground
+         * nothing. */
+        nox_stat_stage2_batch(n);
         for (uint32_t i = 0; i < n; i++)
             stage2_detach(o, batch[i]);
 

@@ -74,6 +74,18 @@ void nox_stat_disk_read(uint64_t n);
  * counted by nox_stat_page_full instead, so no page is sampled twice. */
 void nox_stat_entries_at_stage1(uint32_t entries);
 
+/* How many pages Stage-2 coalesced into ONE pwritev/pwrite, sampled once per
+ * writeback. n == 1 means the batch did not form.
+ *
+ * WHY: NOX_PWRITEV_MAX_IOV is 8 and nothing measured chose it. stage2_collect
+ * only extends a batch with pages whose bases are CONTIGUOUS and already in Q2,
+ * so on a random workload the batch plausibly never forms at all — in which case
+ * the constant is inert and widening it is wasted work. This counter is the
+ * cheap way to find out which world we are in BEFORE tuning anything, and it
+ * costs one increment per writeback on a background thread, not on the
+ * foreground path. See noxdb_config.h at NOX_PWRITEV_MAX_IOV. */
+void nox_stat_stage2_batch(uint32_t n);
+
 /* Human-readable report. Called by nox_close. */
 void nox_stats_dump(FILE *out);
 
@@ -89,6 +101,7 @@ void nox_stats_reset(void);
 #define nox_stat_disk_write(n)           ((void)(n))
 #define nox_stat_disk_read(n)            ((void)(n))
 #define nox_stat_entries_at_stage1(e)    ((void)(e))
+#define nox_stat_stage2_batch(n)         ((void)(n))
 #define nox_stats_dump(out)              ((void)(out))
 #define nox_stats_reset()                ((void)0)
 

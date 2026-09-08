@@ -21,11 +21,12 @@
  * dropped before the caller could take the page lock and a concurrent
  * page_index_remove() could free the page underneath it.
  *
- * REMAINING LIMITATION (lifted in C5): two threads writing the SAME 256KB base
- * concurrently can still LOSE AN UPDATE — the page may be detached and flushed
- * between one thread's write and another's. That is a correctness limit on
- * write ordering, no longer a use-after-free. The C5 tag=FLUSHING pointer swap
- * is the general fix.
+ * The tag=FLUSHING pointer swap that closes the remaining lost-update window HAS
+ * SHIPPED (C5-core, inside C4): otflush.c stage2_detach marks the page FLUSHING
+ * and unlinks it before any I/O, so a writer arriving mid-flush misses the index
+ * and builds a fresh page instead of writing into one in flight. Concurrent
+ * writers on a shared base with disjoint byte ranges are supported; see the
+ * contract at the top of include/noxdb.h for what remains unguaranteed.
  */
 #ifndef PAGE_INDEX_H
 #define PAGE_INDEX_H

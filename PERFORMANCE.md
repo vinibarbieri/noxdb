@@ -384,21 +384,78 @@ base is ever in Q2. The Stage-2 thread count is therefore irrelevant to
 same-base ordering — the guard is stronger than the invariant its own comment
 states.
 
-There is exactly one gap, and it is a specific line: the **full-page forward**
-branch in `stage1_loop` calls `wb_guard_enter` and pushes to Q2 **without**
-first calling `wb_guard_wait`. A page that is already full when Stage-1 pops it
-skips the wait and can join a page of the same base that is still in flight.
+> ⚠️ **The claim in this paragraph is wrong. See §4.5.1.** Two other paths push
+> to Q2 without the wait, one of them from the foreground, so two generations of
+> a base *can* both be in Q2. The measured PASS stands; the explanation for it
+> does not. Kept unedited, per the rule at the top of this document.
 
-The driver never produced that state: it writes 8 B records on a 2 048 B
+### 4.5.1 Correction (2026-09-08): the guard is not what holds the order
+
+**The paragraph above is wrong in its central claim, and the correction is the
+more useful result.** It says at most one page per base is ever in Q2, and that
+the single deviation is one line. Re-reading the three call sites that push to
+Q2 shows **two** paths that skip `wb_guard_wait`, not one, and the second
+cannot take the same fix:
+
+| path | pushes to Q2 | calls `wb_guard_wait` first |
+|---|---|---|
+| `stage1_loop`, hole-filling | after the `pread` | **yes** |
+| `stage1_loop`, full-page forward | `otflush.c:322-330` | no |
+| `otflush_enqueue_full`, **from the foreground** | `otflush.c:263-275` | no |
+
+The third is the one that matters, for two reasons.
+
+**It runs on the caller's thread, holding `p->lock`.** `noxdb.c:138-144` calls
+it inside the locked section. Adding a wait there would park the application's
+own thread on background I/O — the premise OTflush exists to remove — while
+holding the page lock the flusher needs in order to finish and release it. That
+is the same deadlock shape the watermark's admission point is placed to avoid
+(`noxdb.c:76-90`). **The one-line fix does not generalise to it.**
+
+**It is reachable.** `otflush_enqueue_full` returns early when `p->in_queue` is
+set, and a page created by `scrap_write_chunk` normally goes to Q1 immediately
+with `in_queue = 1`, so the push looks dead. But `noxdb.c:138` tests
+`scrap_page_is_full(p)` *before* the `else if (created)` that would have queued
+it. A page created and filled by a **single merge** therefore reaches
+`otflush_enqueue_full` with `in_queue == 0` and is pushed straight to Q2 by the
+foreground. The workload that does it is specific and ordinary: a **256 KiB
+write, page-aligned, below the 1 MiB fast-path threshold**. (The Stage-1 read
+error path at `otflush.c:372` also clears `in_queue` while the page is still in
+the index, which is a second, rarer route.)
+
+**So why does the engine order correctly today?** Not because of the guard.
+`nox_queue_push` appends at the tail and `nox_queue_pop` takes the head
+(`queue.c:45-71`): **Q2 is FIFO, and it has exactly one consumer.** Two
+generations of one base can both sit in Q2 — the guard does not prevent it —
+but the older one was pushed first, so it is popped and written first.
+
+This changes the roadmap consequence, and in the direction that matters:
+
+> Write ordering rests on **single-consumer FIFO**, not on `wb_guard`. Raising
+> `NOX_STAGE2_THREADS` removes that protection, and the guard as written does
+> **not** replace it. The recorded fix — "one `wb_guard_wait` call" — is
+> therefore not sufficient, and the `ssd_is_busy` re-push to the tail
+> (`otflush.c:334`, `:490`) breaks the same FIFO property from the other end.
+
+The driver still never produced the state: it writes 8 B records on a 2 048 B
 stride, covering at most 1 024 of 262 144 bytes, so **no page ever became
-full**. The PASS is therefore structural, and is *not* evidence that the gap is
-harmless — it is evidence that this workload does not reach it.
+full**. The PASS remains structural and remains no evidence that the gap is
+harmless.
 
-**Consequence for the roadmap.** The reason to fix the ordering hazard was to
-unlock more Stage-2 threads. §3.4 shows the device saturates at QD2–4, so more
-Stage-2 threads are worth ~2.8%, not a multiple. The fix stays on the list as
-correctness hygiene — one `wb_guard_wait` call — and comes off the critical
-path.
+**Not fixed here, and the reason is not scope.** A correct fix is a design
+choice among at least three — route full pages through Q1 so every Q2 entry
+passes the single Stage-1 thread; a per-base FIFO instead of one tail; or the
+per-region generation counter C5 already names — and choosing between them
+without a driver that reaches the state would be guessing. `bench/order_repro.c`
+must first be extended to emit a page-filling single merge; only then does a
+FAIL mean anything. **What is deliverable today is the characterization.**
+
+**Consequence for the roadmap, restated.** The reason to fix the ordering
+hazard was to unlock more Stage-2 threads. §3.4 shows the device saturates at
+QD2–4, so more Stage-2 threads are worth ~2.8%, not a multiple. The hazard
+comes off the critical path for that reason — but it is now understood to be
+larger than one line, and that is recorded before anyone acts on the old
+estimate.
 
 ### 4.6 Effective queue depth and CPU cost of the engine (2026-08-26)
 
