@@ -54,11 +54,33 @@ def read_meta(result_dir):
     return meta
 
 
+def read_devbytes(path):
+    """Device throughput from the kernel's own byte counter, bracketed around
+    the fio process.
+
+    NOT from iostat. iostat samples a fixed wall-clock span starting when the
+    observers launch, while fio opens its files first and measures a window
+    offset by a setup time nothing outside fio can see. Comparing a median
+    over one interval against a mean over another manufactured a 25%
+    discrepancy in the second smoke run and broke the direct control. A
+    counter delta covers exactly the interval fio ran."""
+    try:
+        for kv in open(path).read().split():
+            if kv.startswith("mbps="):
+                return float(kv.split("=", 1)[1])
+    except Exception:
+        pass
+    return 0.0
+
+
 def read_iostat(path, skip=0):
-    """Device-side truth. Column positions come from the header, never fixed
-    indices -- iostat's layout differs across sysstat versions and a hardcoded
-    field silently reports the wrong metric."""
-    out = {"dev_mbps": 0.0, "aqu": 0.0, "util": 0.0, "wareq": 0.0}
+    """SHAPE ONLY -- queue depth, utilisation, request size. The throughput
+    number comes from read_devbytes; see there for why.
+
+    Column positions come from the header, never fixed indices: iostat's
+    layout differs across sysstat versions and a hardcoded field silently
+    reports the wrong metric."""
+    out = {"aqu": 0.0, "util": 0.0, "wareq": 0.0}
     try:
         hdr, rows = None, []
         for line in open(path):
@@ -79,10 +101,6 @@ def read_iostat(path, skip=0):
             i = hdr[name]
             return [float(r[i]) for r in rows if len(r) > i]
 
-        if "wMB/s" in hdr:
-            out["dev_mbps"] = med(col("wMB/s"))
-        elif "wkB/s" in hdr:
-            out["dev_mbps"] = med(col("wkB/s")) / 1024.0
         out["aqu"] = med(col("aqu-sz"))
         out["util"] = med(col("%util"))
         out["wareq"] = med(col("wareq-sz"))
@@ -122,6 +140,7 @@ def load(result_dir, skip=0):
         pts.setdefault((contract, layout, nj), []).append({
             "rep": rep,
             "app": w["bw_bytes"] / 1e6,
+            "dev_mbps": read_devbytes(os.path.join(result_dir, tag + ".devbytes")),
             "p99": w["clat_ns"]["percentile"].get("99.000000", 0) / 1000.0,
             "dirty": read_dirty(os.path.join(result_dir, tag + ".dirty")),
             **io,
@@ -169,12 +188,13 @@ def main():
 
     print("\n=== baseline sweep: %s ===" % d)
     print("Contracts are reported SEPARATELY and are never averaged (M1).")
-    print("runtime=%ss ramp=%ss (dropped from the device median) reps=%s "
-          "working set=%s bs=%s"
-          % (meta.get("runtime", "?"), meta.get("ramp", "?"),
-             meta.get("reps", "?"), meta.get("total_size", "?"),
-             meta.get("bs", "?")))
-    print("app  = what fio measured   dev = what the device received (iostat)\n")
+    print("runtime=%ss reps=%s working set=%s bs=%s  (no fio ramp: transients "
+          "are handled by\n  the discarded warm-up and by shuffling, so every "
+          "point's window is knowable)"
+          % (meta.get("runtime", "?"), meta.get("reps", "?"),
+             meta.get("total_size", "?"), meta.get("bs", "?")))
+    print("app  = what fio measured   dev = kernel byte counter, bracketed on fio")
+    print("aqu-sz / %util come from iostat and describe SHAPE, not throughput\n")
 
     curves = {}
     for c in contracts:

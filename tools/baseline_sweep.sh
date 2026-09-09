@@ -295,7 +295,6 @@ randrepeat=0
 norandommap
 time_based=1
 runtime=$RUNTIME
-ramp_time=$RAMP
 group_reporting=1
 EOF
 
@@ -326,11 +325,49 @@ EOF
     fi
 }
 
+# Sectors written to the device, from the kernel's own counter. Field 7 of
+# /sys/block/<dev>/stat, in 512B sectors.
+dev_sectors() {
+    [ -n "$DEV" ] && awk '{print $7}' "/sys/block/$DEV/stat" 2>/dev/null || echo 0
+}
+
 run_fio() {
     local contract=$1 layout=$2 nj=$3 out=$4
     local jf="${out%.json}.fio"
     write_jobfile "$contract" "$layout" "$nj" "$jf"
+
+    # WHY A COUNTER DELTA AND NOT AN iostat MEDIAN.
+    #
+    # The second smoke run still failed the direct control -- 0.95 to 1.25 --
+    # after the layout pass fixed the extent conversion. The residue was that
+    # fio and iostat were not describing the same interval. iostat starts at
+    # T0 and runs a fixed wall-clock span; fio opens its files first, then
+    # ramps, then measures, so its window is offset by a setup time nothing
+    # outside fio can observe, and its tail falls outside iostat's span
+    # entirely. A median over one window compared against a mean over another
+    # is not a comparison, and that alone can manufacture a 25% discrepancy.
+    #
+    # Bracketing the kernel's own byte counter around the fio process removes
+    # the question: both numbers then cover exactly the same interval, and
+    # neither depends on sampling.
+    #
+    # ramp_time is gone for the same reason -- it made fio's window unknowable
+    # from outside. Start-of-load transients are handled where M6 says they
+    # should be: a discarded per-contract warm-up, and repetitions shuffled so
+    # a transient shows up as spread inside a point rather than as slope
+    # across the curve.
+    local s0 t0 s1 t1
+    s0=$(dev_sectors); t0=$(date +%s.%N)
     fio "$jf" --output-format=json --output="$out" >>"$LOG" 2>&1
+    local rc=$?
+    s1=$(dev_sectors); t1=$(date +%s.%N)
+
+    awk -v a="$s0" -v b="$s1" -v x="$t0" -v y="$t1" \
+        'BEGIN { d = (b - a) * 512; e = y - x;
+                 printf "sectors=%d bytes=%d elapsed=%.3f mbps=%.1f\n",
+                        b - a, d, e, (e > 0 ? d / e / 1e6 : 0) }' \
+        > "${out%.json}.devbytes"
+    return $rc
 }
 
 # ---------------------------------------------------------------------------
@@ -405,7 +442,15 @@ try:
 except Exception:
     pass
 
-dev = aqu = util = wareq = 0.0
+dev = 0.0
+try:
+    for kv in open(os.path.join(d, tag + ".devbytes")).read().split():
+        if kv.startswith("mbps="):
+            dev = float(kv.split("=", 1)[1])
+except Exception:
+    pass
+
+aqu = util = wareq = 0.0
 try:
     rows, hdr = [], None
     for line in open(os.path.join(d, tag + ".iostat")):
@@ -418,12 +463,6 @@ try:
     rows = rows[skip:] or rows
     if hdr and rows:
         def col(n): return [float(r[hdr[n]]) for r in rows if n in hdr and len(r) > hdr[n]]
-        # wMB/s is the device's own throughput -- the honest one.
-        for cand in ("wMB/s", "wkB/s"):
-            if cand in hdr:
-                v = col(cand)
-                dev = med(v) / (1024.0 if cand == "wkB/s" else 1.0)
-                break
         aqu, util = med(col("aqu-sz")), med(col("%util"))
         if "wareq-sz" in hdr: wareq = med(col("wareq-sz"))
 except Exception:
@@ -532,7 +571,10 @@ for rep in $(seq 1 "$REPS"); do
         "$HERE/bench_hygiene.sh" drop >/dev/null 2>&1
 
         log "[$run_no/$total_runs] $tag"
-        start_observers "$tag" "$(( RUNTIME + RAMP ))"
+        # Slack past RUNTIME so the samplers outlive fio's file-open phase.
+        # These now supply SHAPE ONLY -- aqu-sz, %util, wareq-sz, Dirty. The
+        # throughput number comes from the counter delta in run_fio.
+        start_observers "$tag" "$(( RUNTIME + 8 ))"
         run_fio "$contract" "$layout" "$nj" "$RESULT_DIR/${tag}.json"
         rc=$?
         stop_observers
@@ -551,16 +593,10 @@ import json, os, sys, statistics
 d, tag, skip = sys.argv[1], sys.argv[2], int(sys.argv[3])
 try:
     app = json.load(open(os.path.join(d, tag + ".json")))["jobs"][0]["write"]["bw_bytes"] / 1e6
-    hdr, rows = None, []
-    for line in open(os.path.join(d, tag + ".iostat")):
-        f = line.split()
-        if f and f[0] == "Device":
-            hdr = {n: i for i, n in enumerate(f)}
-        elif hdr and len(f) > 3:
-            rows.append(f)
-    rows = rows[skip:] or rows
-    key = "wMB/s" if "wMB/s" in hdr else "wkB/s"
-    dev = statistics.median(float(r[hdr[key]]) for r in rows) / (1.0 if key == "wMB/s" else 1024.0)
+    dev = 0.0
+    for kv in open(os.path.join(d, tag + ".devbytes")).read().split():
+        if kv.startswith("mbps="):
+            dev = float(kv.split("=", 1)[1])
     r = app / dev if dev else 0.0
     if r and abs(r - 1.0) > 0.15:
         pct = (1 / r - 1) * 100 if r < 1 else (r - 1) * 100
