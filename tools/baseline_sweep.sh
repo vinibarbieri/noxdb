@@ -169,6 +169,43 @@ fi
 
 mkdir -p "$DATA_DIR" || exit 1
 
+# ---------------------------------------------------------------------------
+# FILE GEOMETRY, FIXED FOR THE WHOLE RUN.
+#
+# The first smoke run failed its own control: the `direct` arm should show
+# app/dev == 1.00 by construction, and it came out 0.67-1.11. Two causes, both
+# from letting the files vary with the point.
+#
+#  1. --fallocate=native reserves space but leaves the extents UNWRITTEN. The
+#     first write into one makes XFS convert the extent and journal it, on the
+#     same device -- writes iostat sees and fio does not report. That alone
+#     puts dev above app.
+#  2. The job name carried the point tag and the per-job size changed with
+#     numjobs, so fio re-laid the files out AT EVERY POINT. direct_shared_nj4
+#     showed the consequence undisguised: %util 10.7, the device idle 89% of a
+#     20 s window while fio built files.
+#
+# So: MAXJOBS files of PER_FILE GiB, created and FULLY WRITTEN once, then never
+# touched again. A point with nj jobs gives each job MAXJOBS/nj of them --
+# every job still owns its files (which is what makes `perjob` a valid i_rwsem
+# control), the total working set stays at TOTAL_SIZE for every point, and no
+# point pays layout. The job name is fixed per layout for the same reason.
+# ---------------------------------------------------------------------------
+MAXJOBS=$(printf '%s\n' $NUMJOBS | sort -n | tail -1)
+PER_FILE=$(( ws_gib / MAXJOBS ))
+[ "$PER_FILE" -lt 1 ] && PER_FILE=1
+
+for nj in $NUMJOBS; do
+    if [ $(( MAXJOBS % nj )) -ne 0 ]; then
+        log "FATAL: numjobs '$nj' does not divide MAXJOBS ($MAXJOBS)."
+        log "       The working set would differ between points and the curve"
+        log "       would compare points measured against different amounts of"
+        log "       data. Use powers of two."
+        exit 1
+    fi
+done
+log "geometry   : $MAXJOBS files x ${PER_FILE}G = $(( MAXJOBS * PER_FILE ))G, laid out once"
+
 # The observers start with fio, so their first RAMP seconds cover fio's own
 # discarded ramp. Taking a median over those rows would drag the device number
 # down by exactly the amount the ramp exists to exclude. Recorded here so the
@@ -228,9 +265,16 @@ fi
 # fio invocation for one point. The three contracts differ in exactly two
 # flags, which is the point -- everything else is held identical.
 # ---------------------------------------------------------------------------
-run_fio() {
-    local contract=$1 layout=$2 nj=$3 out=$4
-    local direct=0 fsync=0 target=()
+# Emit an explicit fio job file.
+#
+# WHY A JOB FILE INSTEAD OF FLAGS: fio derives each file's name from the job
+# name AND the job index, so `--nrfiles` changing with numjobs renames every
+# file and forces a fresh layout at every point -- which is half of why the
+# first smoke run's control failed. Naming the files here decouples them from
+# the point entirely: one fixed pool, laid out once, reused by every point.
+write_jobfile() {
+    local contract=$1 layout=$2 nj=$3 jf=$4
+    local direct=0 fsync=0
 
     case "$contract" in
         buffered) direct=0; fsync=0 ;;
@@ -238,36 +282,55 @@ run_fio() {
         direct)   direct=1; fsync=0 ;;
     esac
 
-    # shared: every job writes the SAME inode -> i_rwsem is contended.
-    # perjob:  fio gives each job its own file under --directory -> i_rwsem is
-    #          per-inode and drops out of the comparison entirely.
-    local per_size
-    if [ "$layout" = "shared" ]; then
-        target=(--filename="$DATA_DIR/shared.dat" --size="$TOTAL_SIZE")
-    else
-        per_size=$(( ws_gib / nj ))
-        if [ "$per_size" -lt 1 ]; then
-            # Only reachable when TOTAL_SIZE < numjobs, i.e. under SMOKE. The
-            # real working set then becomes nj GiB rather than TOTAL_SIZE, so
-            # say so instead of quietly measuring something else.
-            per_size=1
-            log "  NOTE: ${TOTAL_SIZE} / ${nj} jobs rounds to 0; using 1G per job"
-            log "        -> actual working set for this point is ${nj} GiB"
-        elif [ $(( per_size * nj )) -ne "$ws_gib" ]; then
-            log "  NOTE: ${ws_gib}G / ${nj} truncates to ${per_size}G per job"
-            log "        -> actual working set is $(( per_size * nj )) GiB, not ${ws_gib}"
-        fi
-        target=(--directory="$DATA_DIR" --size="${per_size}G" --nrfiles=1)
-    fi
+    cat > "$jf" <<EOF
+[global]
+rw=$RW
+bs=$BS
+ioengine=psync
+iodepth=1
+direct=$direct
+fsync=$fsync
+fallocate=none
+randrepeat=0
+norandommap
+time_based=1
+runtime=$RUNTIME
+ramp_time=$RAMP
+group_reporting=1
+EOF
 
-    fio --name="$(basename "$out" .json)" \
-        "${target[@]}" \
-        --rw="$RW" --bs="$BS" \
-        --ioengine=psync --iodepth=1 --numjobs="$nj" \
-        --direct="$direct" --fsync="$fsync" \
-        --fallocate=native --randrepeat=0 --norandommap \
-        --runtime="$RUNTIME" --time_based --ramp_time="$RAMP" \
-        --group_reporting --output-format=json --output="$out" >>"$LOG" 2>&1
+    if [ "$layout" = "shared" ]; then
+        # Every job writes the SAME inode, so i_rwsem is contended.
+        cat >> "$jf" <<EOF
+
+[w]
+numjobs=$nj
+filename=$DATA_DIR/shared.dat
+size=$TOTAL_SIZE
+EOF
+    else
+        # Each job owns a DISJOINT slice of the fixed file pool. No inode is
+        # ever shared, so i_rwsem cannot be the contended lock -- which is the
+        # entire point of this layout. Every job count uses all MAXJOBS files,
+        # so the working set is identical across the sweep.
+        local per=$(( MAXJOBS / nj )) j i first
+        for j in $(seq 0 $(( nj - 1 ))); do
+            first=$(( j * per ))
+            local list=""
+            for i in $(seq "$first" $(( first + per - 1 ))); do
+                list="${list}${list:+:}$(printf '%s/pj%02d' "$DATA_DIR" "$i")"
+            done
+            printf '\n[w%d]\nnumjobs=1\nfilename=%s\nfilesize=%sG\n' \
+                   "$j" "$list" "$PER_FILE" >> "$jf"
+        done
+    fi
+}
+
+run_fio() {
+    local contract=$1 layout=$2 nj=$3 out=$4
+    local jf="${out%.json}.fio"
+    write_jobfile "$contract" "$layout" "$nj" "$jf"
+    fio "$jf" --output-format=json --output="$out" >>"$LOG" 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -386,6 +449,47 @@ PY
 # first point measured. One discarded warm-up per contract, before anything is
 # recorded.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# LAYOUT PASS. Runs once, and every measured point depends on it.
+#
+# fallocate alone reserves space and leaves the extents UNWRITTEN, so the first
+# write into each one makes XFS convert it and journal the conversion -- device
+# writes that fio never reports and iostat always sees. In the first smoke run
+# that pushed the direct arm's app/dev to 0.67 when it must be 1.00.
+#
+# Writing every byte once removes it: from then on every measured write lands
+# on an already-written extent, which is also what a steady-state workload
+# actually does. Sequential 1M O_DIRECT because the goal is to fill the files
+# quickly, not to measure anything.
+# ---------------------------------------------------------------------------
+layout_pass() {
+    local need=0 i
+    [ -s "$DATA_DIR/shared.dat" ] || need=1
+    for i in $(seq 0 $(( MAXJOBS - 1 ))); do
+        [ -s "$(printf '%s/pj%02d' "$DATA_DIR" "$i")" ] || need=1
+    done
+    if [ "$need" = "0" ]; then
+        log "layout: file pool already present, skipping (rm -rf $DATA_DIR to rebuild)"
+        return
+    fi
+
+    log "layout: writing $(( ws_gib * 2 ))G once -- shared.dat plus $MAXJOBS x ${PER_FILE}G"
+    log "        (this is what makes the direct arm's app/dev == 1.00 control valid)"
+    fio --name=layout_shared --filename="$DATA_DIR/shared.dat" --size="$TOTAL_SIZE" \
+        --rw=write --bs=1M --direct=1 --ioengine=psync --numjobs=1 \
+        --fallocate=none >>"$LOG" 2>&1
+
+    local list=""
+    for i in $(seq 0 $(( MAXJOBS - 1 ))); do
+        list="${list}${list:+:}$(printf '%s/pj%02d' "$DATA_DIR" "$i")"
+    done
+    fio --name=layout_pool --filename="$list" --filesize="${PER_FILE}G" \
+        --rw=write --bs=1M --direct=1 --ioengine=psync --numjobs=1 \
+        --fallocate=none >>"$LOG" 2>&1
+    log "layout: done"
+}
+layout_pass
+
 if [ "$WARMUP" -gt 0 ]; then
     for c in $CONTRACTS; do
         log "warm-up: $c at 8 jobs for ${WARMUP}s (discarded)"
@@ -434,6 +538,40 @@ for rep in $(seq 1 "$REPS"); do
         stop_observers
         [ "$rc" -ne 0 ] && log "  fio exit $rc -- see $LOG"
         summarise "$tag" | tee -a "$LOG"
+
+        # THE CONTROL. With O_DIRECT there is no cache between fio and the
+        # device, so what the application submitted and what the device
+        # received must agree. When they do not, the MEASUREMENT is wrong --
+        # not the kernel -- and every other number in the run inherits that.
+        # Checked automatically because the first smoke run failed it and it
+        # took a human reading thirty lines to notice.
+        if [ "$contract" = "direct" ]; then
+            python3 - "$RESULT_DIR" "$tag" "$RAMP" <<'PY' | tee -a "$LOG"
+import json, os, sys, statistics
+d, tag, skip = sys.argv[1], sys.argv[2], int(sys.argv[3])
+try:
+    app = json.load(open(os.path.join(d, tag + ".json")))["jobs"][0]["write"]["bw_bytes"] / 1e6
+    hdr, rows = None, []
+    for line in open(os.path.join(d, tag + ".iostat")):
+        f = line.split()
+        if f and f[0] == "Device":
+            hdr = {n: i for i, n in enumerate(f)}
+        elif hdr and len(f) > 3:
+            rows.append(f)
+    rows = rows[skip:] or rows
+    key = "wMB/s" if "wMB/s" in hdr else "wkB/s"
+    dev = statistics.median(float(r[hdr[key]]) for r in rows) / (1.0 if key == "wMB/s" else 1024.0)
+    r = app / dev if dev else 0.0
+    if r and abs(r - 1.0) > 0.15:
+        pct = (1 / r - 1) * 100 if r < 1 else (r - 1) * 100
+        print("  !! CONTROL FAILED: direct app/dev = %.2f, expected 1.00 +/- 0.15." % r)
+        print("  !! Device wrote %.0f%% %s than the application submitted."
+              % (pct, "more" if r < 1 else "less"))
+        print("  !! Measurement problem, not a kernel result. Do not quote this run.")
+except Exception:
+    pass
+PY
+        fi
 
         # ---------------------------------------------------------------
         # The profile that actually answers the i_rwsem question. Throughput

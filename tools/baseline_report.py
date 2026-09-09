@@ -231,8 +231,48 @@ def main():
                 print("      throughput. Only the dev column is a storage number here.")
 
     # ---------------------------------------------------------------
-    # The verdict this sweep was built to produce.
+    # THE CONTROL, checked before any verdict is offered.
+    #
+    # O_DIRECT puts no cache between the application and the device, so app
+    # and dev must agree. If they do not, the run measured something other
+    # than what it claims -- unwritten-extent conversion, a layout pass
+    # bleeding into a point, an observation window misaligned with fio -- and
+    # no scaling shape derived from it means anything. Printed FIRST and
+    # loudly, because the alternative is a plausible-looking curve.
     # ---------------------------------------------------------------
+    bad = []
+    for (c, l, nj), rows in sorted(pts.items()):
+        if c != "direct":
+            continue
+        app = med([r["app"] for r in rows])
+        dev = med([r["dev_mbps"] for r in rows])
+        if dev > 0 and abs(app / dev - 1.0) > 0.15:
+            bad.append((l, nj, app / dev))
+
+    print("\n" + "=" * 78)
+    if bad:
+        print("CONTROL FAILED -- %d direct points disagree with the device" % len(bad))
+        print("=" * 78)
+        for l, nj, r in bad:
+            print("  direct/%-7s %2d jobs: app/dev = %.2f" % (l, nj, r))
+        print("")
+        print("  With O_DIRECT there is no cache in the path, so these must be")
+        print("  1.00. They are not, which makes this a MEASUREMENT problem and")
+        print("  not a kernel result. NOTHING BELOW MAY BE QUOTED.")
+        print("")
+        print("  Usual causes, in the order worth checking:")
+        print("    - the layout pass did not run, so writes still convert")
+        print("      unwritten extents and XFS journals work fio never sees")
+        print("    - a point overlaps the previous point's writeback")
+        print("    - iostat is watching a different device than fio writes to")
+    else:
+        print("CONTROL OK -- every direct point agrees with the device within 15%")
+        print("=" * 78)
+        print("  O_DIRECT has no cache in the path, so app/dev == 1.00 is the")
+        print("  expectation this arm exists to check. It holds, so the buffered")
+        print("  arms' divergence is a property of the page cache rather than")
+        print("  of the measurement.")
+
     print("\n" + "=" * 78)
     print("SCALING SHAPE  (device-side throughput, first jobs -> last jobs)")
     print("=" * 78)
