@@ -161,9 +161,14 @@ if [ "$(awk '/SwapTotal/{print $2}' /proc/meminfo)" != "0" ]; then
     exit 1
 fi
 
+# TWO copies of the working set are laid out -- shared.dat and the per-job
+# pool -- plus the 16G anchor file. Checking for one copy passes preflight and
+# then runs out of space partway through a three-hour sweep.
+need_gib=$(( ws_gib * 2 + 24 ))
 free_gib=$(df -BG --output=avail "$MNT" 2>/dev/null | tail -1 | tr -dc '0-9')
-if [ -n "$free_gib" ] && [ "$free_gib" -lt $(( ws_gib + 8 )) ]; then
-    log "FATAL: only ${free_gib} GiB free on $MNT, need ~$(( ws_gib + 8 ))"
+if [ -n "$free_gib" ] && [ "$free_gib" -lt "$need_gib" ]; then
+    log "FATAL: only ${free_gib} GiB free on $MNT, need ~${need_gib}"
+    log "       (shared.dat ${ws_gib}G + per-job pool ${ws_gib}G + anchor 16G)"
     exit 1
 fi
 
@@ -250,6 +255,7 @@ anchor() {
     python3 -c "import sys; sys.exit(0 if abs($got-$ANCHOR_MBPS)/$ANCHOR_MBPS < 0.05 else 1)"
 }
 
+run_anchor_gate() {
 if [ "$SMOKE" != "1" ]; then
     if anchor; then
         log "ANCHOR OK -- this run is comparable to PERFORMANCE.md section 3."
@@ -260,6 +266,7 @@ if [ "$SMOKE" != "1" ]; then
         log "!!! this warning belongs next to every number that follows."
     fi
 fi
+}
 
 # ---------------------------------------------------------------------------
 # fio invocation for one point. The three contracts differ in exactly two
@@ -528,6 +535,13 @@ layout_pass() {
     log "layout: done"
 }
 layout_pass
+
+# AFTER the layout pass, deliberately. The anchor exists to say whether this
+# drive is in the state PERFORMANCE.md section 3 was measured in -- and the
+# state that matters is the one the POINTS are measured in, which is after
+# 2x the working set has just been written. Anchoring before the layout pass
+# would certify a drive condition that no measured point ever saw.
+run_anchor_gate
 
 if [ "$WARMUP" -gt 0 ]; then
     for c in $CONTRACTS; do
