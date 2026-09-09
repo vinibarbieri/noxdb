@@ -124,16 +124,34 @@ command -v fio    >/dev/null || { log "FATAL: fio not installed"; exit 1; }
 command -v iostat >/dev/null || log "WARN: sysstat missing -- no device-side view"
 command -v perf   >/dev/null || log "WARN: perf missing -- no CPU-side view"
 
-# The whole buffered arm is void if the working set fits in RAM.
+# The whole buffered arm is void if the working set fits in RAM: the cache
+# absorbs everything and the curve describes memcpy, not storage.
+#
+# awk, not bc -- bc is not installed on the bench box and a preflight check that
+# dies on its own dependency is worse than no check.
 ram_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
 ram_gib=$(( ram_kb / 1048576 ))
-ws_gib=${TOTAL_SIZE%G}
-log "RAM ${ram_gib} GiB vs working set ${ws_gib} GiB (ratio $(echo "scale=1; $ws_gib/$ram_gib" | bc))"
+ws_gib=${TOTAL_SIZE%[Gg]}
+case "$ws_gib" in
+    ''|*[!0-9]*) log "FATAL: TOTAL_SIZE must look like 64G, got '$TOTAL_SIZE'"; exit 1 ;;
+esac
+log "RAM ${ram_gib} GiB vs working set ${ws_gib} GiB (ratio $(awk -v w="$ws_gib" -v r="$ram_gib" 'BEGIN{printf "%.1f", w/r}'))"
+
 if [ "$ws_gib" -lt $(( ram_gib * 2 )) ]; then
-    log "FATAL: working set under 2x RAM. The buffered curve would measure the"
-    log "       page cache absorbing everything, i.e. memcpy, not storage."
-    log "       Raise TOTAL_SIZE. Refusing to produce that number."
-    exit 1
+    if [ "$SMOKE" = "1" ]; then
+        # SMOKE exists to exercise the plumbing in twenty minutes, and its
+        # numbers are declared worthless before it starts. Enforcing a validity
+        # floor on a run whose output nobody may quote is the check firing at
+        # the wrong target -- so it warns here and still refuses below.
+        log "SMOKE: working set is UNDER 2x RAM. The buffered arm will measure"
+        log "SMOKE: the cache absorbing everything. Expected, and exactly why"
+        log "SMOKE: none of these numbers may be quoted. Continuing."
+    else
+        log "FATAL: working set under 2x RAM. The buffered curve would measure the"
+        log "       page cache absorbing everything, i.e. memcpy, not storage."
+        log "       Raise TOTAL_SIZE. Refusing to produce that number."
+        exit 1
+    fi
 fi
 
 # Swap on this box lives on the USB-attached OS disk. One page-out during a
@@ -227,8 +245,18 @@ run_fio() {
     if [ "$layout" = "shared" ]; then
         target=(--filename="$DATA_DIR/shared.dat" --size="$TOTAL_SIZE")
     else
-        per_size=$(( ${TOTAL_SIZE%G} / nj ))
-        [ "$per_size" -lt 1 ] && per_size=1
+        per_size=$(( ws_gib / nj ))
+        if [ "$per_size" -lt 1 ]; then
+            # Only reachable when TOTAL_SIZE < numjobs, i.e. under SMOKE. The
+            # real working set then becomes nj GiB rather than TOTAL_SIZE, so
+            # say so instead of quietly measuring something else.
+            per_size=1
+            log "  NOTE: ${TOTAL_SIZE} / ${nj} jobs rounds to 0; using 1G per job"
+            log "        -> actual working set for this point is ${nj} GiB"
+        elif [ $(( per_size * nj )) -ne "$ws_gib" ]; then
+            log "  NOTE: ${ws_gib}G / ${nj} truncates to ${per_size}G per job"
+            log "        -> actual working set is $(( per_size * nj )) GiB, not ${ws_gib}"
+        fi
         target=(--directory="$DATA_DIR" --size="${per_size}G" --nrfiles=1)
     fi
 
