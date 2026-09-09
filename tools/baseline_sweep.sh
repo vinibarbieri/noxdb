@@ -68,8 +68,12 @@
 #       one rep, 20s points, no warm-up, no profile. Proves the script runs end
 #       to end BEFORE a night is committed to it. Its numbers are worthless.
 #
-# Env: REPS(5) RUNTIME(60) RAMP(10) WARMUP(300) TOTAL_SIZE(64G)
+# Env: REPS(5) RUNTIME(60) WARMUP(300) SETTLE(900) TOTAL_SIZE(64G)
 #      FSYNC_EVERY(32) ANCHOR_MBPS(410.0) PROFILE_JOBS(16) ACTIVE(1) DEV(auto)
+#
+# THE ANCHOR IS A GATE, NOT A NOTE. If it reports more than a few percent off,
+# stop and re-precondition. The 2026-09-09 run was allowed to continue past a
+# -84.4% anchor and produced 150 points describing a drive in GC collapse.
 #
 set -uo pipefail
 
@@ -536,7 +540,31 @@ layout_pass() {
 }
 layout_pass
 
-# AFTER the layout pass, deliberately. The anchor exists to say whether this
+# ---------------------------------------------------------------------------
+# SETTLE. Added 2026-09-09 after the first full run was withheld.
+#
+# The layout pass writes TWO copies of the working set -- 128 GiB at the
+# default -- and the run then began measuring about ninety seconds later. That
+# saturates the pSLC cache and leaves the drive in direct-to-TLC with a GC
+# backlog: the anchor came out at 63.9 MB/s against 410.0, six times slow,
+# before a single measured point ran.
+#
+# M2 puts preconditioning at 748 GiB followed by settling, and section 5
+# already prescribes a per-point settle for the same reason. Writing 128 GiB
+# and measuring immediately ignored both. SETTLE is not optional on a drive
+# that was just filled; set it to 0 only when the pool already existed and no
+# layout pass ran.
+# ---------------------------------------------------------------------------
+SETTLE=${SETTLE:-900}
+if [ "$SMOKE" = "1" ]; then SETTLE=${SETTLE_SMOKE:-0}; fi
+if [ "$SETTLE" -gt 0 ]; then
+    log "settle: idling ${SETTLE}s so the controller drains its GC backlog"
+    log "        (skip with SETTLE=0 only if no layout pass ran)"
+    sync
+    sleep "$SETTLE"
+fi
+
+# AFTER the layout pass and AFTER the settle, deliberately. The anchor exists to say whether this
 # drive is in the state PERFORMANCE.md section 3 was measured in -- and the
 # state that matters is the one the POINTS are measured in, which is after
 # 2x the working set has just been written. Anchoring before the layout pass

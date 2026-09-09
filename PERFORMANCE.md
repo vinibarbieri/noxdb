@@ -649,6 +649,46 @@ Both artifacts are now detected automatically by `tools/fio_report.py`, which
 flags monotonic repetitions and non-reproducing anchors rather than quietly
 taking a median of a transient.
 
+**The 2026-09-09 baseline attempt was withheld (open).**
+A page-cache baseline sweep ran to completion — 150 points, three durability
+contracts × two file layouts × five thread counts — and **none of it is
+reportable**. Two independent pre-registered checks failed, and recording why
+is more useful than the curve would have been.
+
+*The anchor.* `tools/baseline_sweep.sh` reproduces one §3.1 point in its
+original libaio configuration before measuring anything. It came out at
+**63.9 MB/s against 410.0 — −84.4%**. The drive was six times slower than the
+state §3 was measured in, *before the first measured point ran*, so nothing in
+the sweep is comparable to this document.
+
+The cause is a methodology error, and it is this document's own methodology.
+The script lays out two copies of the working set — 128 GiB — so that every
+measured write lands on an already-written extent, and then began measuring
+about ninety seconds later. M2 puts preconditioning at 748 GiB followed by
+settling; §5 already prescribes a per-point settle for exactly this reason.
+**The script had no settle at all.** Writing 128 GiB saturates the pSLC cache
+and leaves the drive in direct-to-TLC with a garbage-collection backlog, which
+is what 63.9 MB/s is a picture of. The measured points then reported 50–120
+MB/s against a device that does 420, with per-point spreads of 25–120%.
+
+The anchor only caught it because it had been moved to run *after* the layout
+pass earlier the same day, on the argument that the state worth certifying is
+the one the points are measured in. In its original position it would have
+passed and issued a false green light.
+
+*The control.* The `direct` arm exists as a control: with `O_DIRECT` there is
+no cache between the application and the device, so application-reported and
+device-counted bytes must agree. All ten direct points came out at
+**0.65–0.84** — the device received 20–35% more than fio submitted. On a
+smoke run at an 8 GiB working set the same check gave 1.02 across the board,
+so the discrepancy appears with the larger working set or the degraded drive
+and **is not explained**. Metadata and journal traffic were considered and are
+the wrong order of magnitude; page-cache writeback is ruled out by
+`Dirty` reading 0 on every direct point.
+
+Two failed checks, one understood and one not. Fix the settle, re-run, and do
+not report a baseline until both hold.
+
 **No thread pinning.** M3 requires it and the §3 sweep did not use it.
 
 **Residual GC bleeds between points (open).**
