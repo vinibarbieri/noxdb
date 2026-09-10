@@ -399,6 +399,25 @@ Header crossover is exactly `NOX_DATAZONE_SIZE / NOX_MAX_ENTRIES` =
 Below the crossover nearly every page is evicted because its 64-entry index
 ran out, not because its 256 KiB filled — which is what drives the 13.47×.
 
+**Which runs feed this table.** Neither column is a single run, and the
+durations differ:
+
+- **256 B** (`SOAK_MAXLEN=512`): pages sealed by entry exhaustion and the
+  watermark engaging come from a short `-DNOX_STATS` soak (3 s, 16 threads).
+  The 13.47× also comes from a 16-thread `-DNOX_STATS` soak of this workload,
+  but the records do not preserve which run or how long it was. Peak RSS and
+  `nox_close` come from the 1 200 s gate run of §4.3, which was built without
+  `-DNOX_STATS` and so reports no page counts.
+- **4 KiB** (`SOAK_MAXLEN=8192`): every figure comes from one 30 s
+  `-DNOX_STATS` soak, 16 threads.
+
+Every run whose configuration is recorded used the soak driver's default
+`SHARED_BASES=4`: four 256 KiB bases, 1 MiB of address space. For the 4 KiB
+column that working set is tiny, so its peak RSS, the watermark never engaging
+and the 0.004 s `nox_close` describe that working set, not the engine in
+general. The entry-exhaustion share is the column's result; the other three
+figures are not.
+
 ### 4.5 Write-ordering under multiple Stage-2 threads (2026-08-20)
 
 `src/noxdb_config.h` argues in prose that `NOX_STAGE2_THREADS > 1` allows two
@@ -561,10 +580,10 @@ by a completely different route (engine counters, not `iostat`).
 > preconditioned. The `aqu-sz` result does not depend on the region size; the
 > throughput figure does, and must not be read as an engine bandwidth number.
 
-**This run does not close the 20-minute soak gate.** The soak binary says so
-itself: 300 s is a smoke run and the gate requires ≥ 1200 s. All three criteria
-passed (integrity, RSS bounded, no stall at p99.9), which validates the driver,
-not the gate. The eviction watermark was confirmed armed and binding —
+**This 300 s run is a smoke run, not the gate.** The soak binary says so
+itself: the gate requires ≥ 1200 s, and it passed at full length on 2026-08-18
+(§4.3). All three criteria passed here too (integrity, RSS bounded, no stall at
+p99.9). The eviction watermark was confirmed armed and binding —
 throttling at 4096 live pages, RSS plateauing at 481 MB against a 1144 MB
 ceiling.
 
@@ -789,8 +808,10 @@ but it is not clean and should move off-device.
   §4.6. The prediction recorded here was wrong: predicted ≥ 4, measured 1.58.**
 - **The 8.37 s foreground stall.** §4.6 records the exact maximum; the cause is
   not established. Needs off-CPU analysis, not another soak.
-- **The 20-minute soak gate at full length.** §4.6's soak was a 300 s smoke
-  run; the criterion requires ≥ 1200 s.
+- **The 20-minute soak gate at full length.** ✅ **Closed 2026-08-18 — see
+  §4.3** (gate build, without `-DNOX_STATS`). Since then the default build has
+  changed only in a once-per-engine diagnostic; re-run on current code before
+  C10.
 
 ### Not claimable
 
