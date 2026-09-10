@@ -7,9 +7,7 @@
 ![platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20O__DIRECT-lightgrey)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-> **Status: early and in active development.** This is a research/portfolio project built in public. The MVP is write-only and not production-ready. Interfaces and internals change cycle to cycle.
->
-> **Follow the build:** I document the engineering process (benchmarks, bugs, and design trade-offs) in biweekly threads on X: **[@ViniBarbieri_11](https://x.com/ViniBarbieri_11)**. See the [Roadmap](#roadmap) below for where it's headed.
+> **Status: early and in active development.** This is a learning project: I am building it to understand how a storage engine meets a modern SSD, and how to measure what it does. The MVP is write-only and not production-ready. Interfaces and internals change cycle to cycle.
 
 ---
 
@@ -155,6 +153,8 @@ the device and the engine's own behaviour. [`PERFORMANCE.md`](PERFORMANCE.md)
 
 NoxDB is a **user-space** reimplementation of ideas from the **WSBuffer** paper (Zhan et al., *"Rearchitecting Buffered I/O in the Era of High-Bandwidth SSDs,"* USENIX FAST '26). WSBuffer is a Linux **kernel** filesystem module that delegates durability to the filesystem. NoxDB rebuilds its scrap-buffer and opportunistic two-stage flush mechanisms as a **standalone user-space engine over `O_DIRECT`**. The paper is the conceptual seed; the user-space engine and its measurement record are original work.
 
+Implementation written with heavy help from Claude Code; the design study, code review and measurement design are mine.
+
 **Durability is out of scope, deliberately.** There is no WAL, no recovery and no transactions: a crash mid-flush loses whatever had not reached the device. The scope was frozen at the I/O path so the engine could be *measured* rather than left half-built in four directions.
 
 Paper: <https://www.usenix.org/conference/fast26/presentation/zhan>
@@ -162,6 +162,10 @@ Paper: <https://www.usenix.org/conference/fast26/presentation/zhan>
 The two device properties the design reasons with, **read/write asymmetry (α)** and **access concurrency (k)**, come from the **Parametric I/O (PIO) model** (Papon & Athanassoulis, *"A Parametric I/O Model for Modern Storage Devices,"* DaMoN '21). WSBuffer does not cite PIO; linking the two is this repository's framing. NoxDB uses α and k as vocabulary. It does not implement the model, and it has not measured either parameter by the paper's methodology.
 
 Paper: <https://doi.org/10.1145/3465998.3466003>
+
+## Follow along
+
+I write up the engineering process (benchmarks, bugs, and design trade-offs) in weekly threads on X: [@ViniBarbieri_11](https://x.com/ViniBarbieri_11).
 
 ## License
 
