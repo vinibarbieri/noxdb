@@ -19,7 +19,7 @@ A single `scrap_page_t` MUST be logically split into two components to satisfy a
     *   `uint16_t ssd_id`: 2B SSD-id field for identifying the underlying SSD.
     *   `uint8_t tag`: 1B field for recording the page flushing state.
     *   `entries`: An array of **64** index entries, each 8B in size (4B offset + 4B size), used to track data-segments. WSBuffer's default is 15; §2.1 records why this engine sets 64 and what it measured to get there.
-2.  **Data Zone (256 KB):** A pointer to a 256KB memory region 3. 
+2.  **Data Zone (256 KB):** A pointer to a 256KB memory region.
     *   *CRITICAL C IMPLEMENTATION RULE:* The Data Zone must NOT be allocated continuously with the header struct via a single `malloc`. It MUST be allocated separately using `posix_memalign(..., 4096, 256 * 1024)` to ensure the memory address satisfies `O_DIRECT` requirements.
 
 ## 2.1 Index Entry Count (`NOX_MAX_ENTRIES = 64`)
@@ -136,7 +136,7 @@ It stops being free at either of these points, and both should be treated as dec
 2.  **Persisting the header to disk** makes the value part of the on-disk format; changing it then requires a version field.
 
 ## 3. Buffer-Minimized Data Access (The Router)
-The engine must implement a `write_data` mechanism that splits and routes user writes to either the SSD or the RAM Scrap Buffer to proactively leverage SSD bandwidth and minimize buffered data 6.
+The engine must implement a `write_data` mechanism that splits and routes user writes to either the SSD or the RAM Scrap Buffer to proactively leverage SSD bandwidth and minimize buffered data.
 
 The logic MUST follow this simplified MVP flow:
 *   **Fast Path (Direct I/O):** IF the `req_size >= 1MB` AND the `req_size` is a multiple of 4096 AND the `req_offset` is a multiple of 4096:
@@ -144,7 +144,7 @@ The logic MUST follow this simplified MVP flow:
     *   Write data directly to the SSD via `O_DIRECT`.
 *   **Scrap Path (Scrap Buffer):** IF the `req_size < 1MB` OR the request is unaligned:
     *   Route the write to the Scrap Buffer in RAM.
-    *   Merge the new data with existing address-overlapping data-segments by querying and updating the scrap-page header's 15 index entries.
+    *   Merge the new data with existing address-overlapping data-segments by querying and updating the scrap-page header's `NOX_MAX_ENTRIES` (64) index entries (§2.1).
     *   If the page becomes full, update the header's tag field and enqueue it to OTflush Stage-2.
 
 ## 4. Opportunistic Two-Stage Flushing (OTflush)
@@ -153,7 +153,7 @@ To prevent stalling the foreground user writes, NoxDB uses asynchronous pthreads
 *   **Stage-2 (Queue-2 / Writes):** Background threads dequeue fully assembled 256KB scrap-pages and write them back to the SSD. After the write completes, the memory is reclaimed.
 
 ## 5. Concurrency Model
-To avoid the severe lock contention seen in the Linux Kernel's XArray (`xa_lock`) during intensive writes, NoxDB avoids massive global locks, 13.
+To avoid the severe lock contention seen in the Linux Kernel's XArray (`xa_lock`) during intensive writes, NoxDB avoids massive global locks.
 *   **Per-Page Locks:** Scrap-page updates and flushes must use fine-grained per-scrap-page locks. This ensures that background OTflush threads and foreground user writes do not block each other unnecessarily.
 *   **Sharded Page Index:** The page index (offset → resident scrap page) must NOT be guarded by a single global lock — that would reintroduce the exact XArray-style bottleneck this design exists to escape. The index is partitioned into independent *shards*, each with its own mutex; a page maps to a shard by its hash. Concurrent writers touching pages in different shards never serialize on the index.
 
