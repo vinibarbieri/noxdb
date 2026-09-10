@@ -153,8 +153,8 @@ void scrap_page_apply_holes(scrap_page_t *p, const void *scratch);
  * A hole means "the user did not write here", so the bytes on disk must survive
  * the writeback. Without this, Stage-2 would write zeros over valid data
  * (docs/00_flow_summary.md:79). A FULL page has no holes and returns
- * immediately without issuing a single pread — the read/write asymmetry win
- * (docs/03 §3).
+ * immediately without issuing a single pread: the read-before-write is avoided
+ * outright, not just moved off the foreground (docs/03 §3).
  * Returns 0 on success, -1 on I/O error.
  */
 int scrap_page_fill_holes(scrap_page_t *p, int fd);

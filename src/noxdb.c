@@ -137,7 +137,8 @@ static int scrap_write_chunk(nox_engine_t *e, uint64_t base, uint32_t intra,
 
         if (scrap_page_is_full(p)) {
             /* Fully assembled: straight to Q2, skipping Stage-1 entirely. No
-             * holes means no read-before-write at all — the asymmetry win
+             * holes means no read-before-write at all, which is WSBuffer's
+             * partial-page penalty avoided outright rather than deferred
              * (docs/03 §3). Eviction by CAPACITY, which the header size does not
              * control — the design working as intended. */
             nox_stat_page_full(p->hdr.number);

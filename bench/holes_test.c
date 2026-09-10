@@ -172,7 +172,7 @@ static void test_fill_holes_preserves_disk(void)
     printf("  fill_holes preserves     OK (%d preads, no corruption)\n", g_preads);
 }
 
-/* A full page needs no Stage-1 read at all — the asymmetry win. */
+/* A full page needs no Stage-1 read at all: no read-before-write to pay. */
 static void test_full_page_needs_no_read(void)
 {
     scrap_page_t *p = scrap_page_alloc(NOX_DATAZONE_SIZE, 0);
