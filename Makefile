@@ -200,10 +200,11 @@ gate-c4-tsan:
 
 # C4-B6 addendum / C4-G7: >=20min soak with OVERLAPPING
 # 256KB bases (many threads share one page_index slot/page-lock/queue slot -
-# the case gate-c3/gate-c4 deliberately partition away from), sampling both
-# memcmp integrity and RSS over time. See bench/otflush_soak.c's header for
-# why a FAIL here on integrity or RSS alone is a documented, expected C5-core
-# gap (C4-B8/C4-B9), not a mystery bug.
+# the case gate-c3/gate-c4 deliberately partition away from), checking memcmp
+# integrity, bounded RSS and foreground stalls over time. A FAIL on integrity
+# alone is the documented C4-B8 gap: the FLUSHING swap is not built yet. A FAIL
+# on RSS is a real defect, because the C4-B9 eviction watermark has landed.
+# See bench/otflush_soak.c's header.
 # Defaults: 20 min / 16 threads against /mnt/nvme/c4soak.dat. Override for a
 # short smoke run, e.g.:
 #   make soak-c4 SOAK_SECONDS=30 SOAK_THREADS=4
