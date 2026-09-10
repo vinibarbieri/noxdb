@@ -70,7 +70,7 @@ noxdb/
 │   └── noxdb_config.h     # compile-time constants (block size, thresholds)
 ├── bench/                 # gates, soaks, repros, and the standalone O_DIRECT probe
 ├── tools/                 # measurement harness: hygiene, fio sweep, report, overnight
-├── docs/                  # architecture, POSIX constraints, PIO theory, design notes
+├── docs/                  # architecture, POSIX constraints, problem statement + PIO, design notes
 ├── PERFORMANCE.md         # the measurement record
 ├── Makefile
 └── LICENSE
