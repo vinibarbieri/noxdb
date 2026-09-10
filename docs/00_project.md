@@ -8,8 +8,8 @@ Development is strictly guided by the following core reference documents:
 
 | Reference | Role |
 |---|---|
-| **WSBuffer Paper** — *"Rearchitecting Buffered I/O in the Era of High-Bandwidth SSDs"* | Blueprint for data routing, `scrap_page_t`, and the OTflush mechanism |
-| **CHILL Lab Research Statement** | Establishes the PIO Model: exploit SSDs via read/write asymmetry and access concurrency |
+| **WSBuffer** — Zhan et al., *"Rearchitecting Buffered I/O in the Era of High-Bandwidth SSDs"*, USENIX FAST '26 | Problem statement (the three buffered-I/O challenges, §2.3–2.4) and blueprint for data routing, `scrap_page_t`, and the OTflush mechanism |
+| **PIO model** — Papon & Athanassoulis, *"A Parametric I/O Model for Modern Storage Devices"*, DaMoN '21, [doi:10.1145/3465998.3466003](https://doi.org/10.1145/3465998.3466003) | Device vocabulary: read/write asymmetry (α) and access concurrency (k). Not cited by WSBuffer; the link is this project's framing |
 | **OSTEP** — *Part III: Persistence* | Foundation for log-structured FS principles and crash consistency (WAL, `fsync`) |
 | **TLPI** — *Chapters 4, 5, 13* | Strict rulebook for POSIX: `O_DIRECT` alignment, `pread()`/`pwrite()`, scatter-gather I/O |
 
@@ -25,13 +25,15 @@ The benchmark target is a **dedicated, clean NVMe SSD** (WD SN530, TLC, fixed OE
 
 Historically, applications relied on the Linux **Page Cache** to bridge the speed gap between memory and storage. In the era of high-bandwidth PCIe NVMe SSDs, the OS page cache has become a severe bottleneck.
 
-The **PIO Model** identifies three critical challenges:
+**WSBuffer** (§2.3, summarized in §2.4) identifies three challenges of buffered I/O on high-bandwidth SSDs:
 
-| # | Challenge | Description |
-|---|---|---|
-| **C1** | Costly Over-Buffering | OS places all incoming writes into the page cache on the critical path, burning CPU cycles and failing to exploit raw sequential SSD bandwidth |
-| **C2** | Concurrency Limitations | High-intensity writes cause severe lock contention in kernel memory management (e.g., XArray locks), throttling the CPU and preventing the SSD from using its internal parallel channels |
-| **C3** | Read-Before-Write Penalty | Small, unaligned, or partial-page writes force the OS to synchronously read a full block from SSD before modification — prohibitively expensive latency spikes |
+| Challenge | Description (as measured in WSBuffer) |
+|---|---|
+| **Over-buffering** | Page caching is overused to buffer all incoming writes. In the paper's ideal-case test (unlimited memory, background flushing disabled), buffered I/O reaches lower write bandwidth than direct I/O (§2.3.1) |
+| **Page-management contention** | Under heavy writes, concurrent free-page insertions, clean-page deletions and page-state updates contend on XArray's non-scalable spinlock (`xa_lock`), degrading foreground writes and background flushing and freezing a large amount of memory (§2.3.2). The paper measured this with one file per writer thread; NoxDB's single-file case adds the inode's `i_rwsem` as a second candidate (see `PERFORMANCE.md` §5) |
+| **Read-before-write** | A partial-page write that misses the page cache triggers a page fault and a slow SSD read to fill the page before it can be updated (§2.3.3) |
+
+> The paper labels these C1–C3. This repository does not reuse those labels: C1–C4 name its build cycles (README, Roadmap).
 
 ---
 

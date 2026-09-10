@@ -1,13 +1,13 @@
 # NoxDB — Project Flow (study notes)
 
-## Context: the problem (PIO Model)
+## Context: the device model (PIO) and the problem (WSBuffer)
 
-NVMe SSDs have 2 characteristics that drive the whole design (doc 03):
+Two device properties frame the design. They are the two parameters of the **PIO model** (Papon & Athanassoulis, DaMoN '21; doc 03):
 
-1. **Read/write asymmetry** — writes are expensive/slow, reads are cheap.
-2. **Access concurrency** — multiple internal channels/dies process many I/Os in parallel.
+1. **Read/write asymmetry (α)** — writes cost more than reads.
+2. **Access concurrency (k)** — multiple internal channels/dies process many I/Os in parallel.
 
-Specific pain of the Linux page cache: a **partial/unaligned write** that misses the cache forces a **synchronous read-before-write** (reads the block from SSD before updating), blocking the user. On top of that, the page cache uses a global lock (XArray) that chokes SSD concurrency.
+The page-cache problem itself comes from **WSBuffer** (Zhan et al., FAST '26, §2.3), not from PIO. Specific pain: a **partial/unaligned write** that misses the cache triggers a page fault and a **slow SSD read to fill the page before updating it** (read-before-write), blocking the user. On top of that, page-management updates contend on the XArray's non-scalable spinlock (`xa_lock`), which limits concurrent page updates under heavy writes.
 
 NoxDB goal: **never make the user wait on SSD I/O**, and **saturate SSD bandwidth** by exploiting its internal parallelism.
 

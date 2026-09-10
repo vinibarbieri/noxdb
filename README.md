@@ -15,11 +15,13 @@
 
 ## The problem
 
-On a modern PCIe NVMe SSD, the Linux **page cache** (the layer meant to make I/O fast) often becomes the ceiling. At millions of IOPS, the OS still funnels every write through the cache on the critical path. Three costs (the *PIO model*) scale **against** you as the drive gets faster:
+On a modern PCIe NVMe SSD, the Linux **page cache** (the layer meant to make I/O fast) often becomes the ceiling: buffered I/O funnels every write through the cache on the critical path. The WSBuffer paper (Zhan et al., FAST '26, §2.3–2.4) measures this on high-bandwidth SSDs and names three challenges:
 
-- **Over-buffering**: CPU burned copying data into the cache instead of exploiting raw sequential bandwidth.
-- **Concurrency limits**: kernel-side serialization chokes concurrent writers and starves the SSD's internal parallel channels. The literature names the page cache's XArray lock; on a single file the inode's `i_rwsem` is a second candidate, and **this repository has not yet separated the two**. See [`PERFORMANCE.md`](PERFORMANCE.md) §5 — it needs a profiler, not an assertion.
-- **Read-before-write**: a small, unaligned write forces a synchronous full-block read from disk before it can be modified.
+- **Over-buffering**: page caching is overused to buffer *all* incoming writes, so buffered I/O reaches lower write bandwidth than direct I/O on the same device.
+- **Page-management contention**: under heavy writes, page insertions, deletions and state updates contend on the XArray's non-scalable spinlock (`xa_lock`), degrading both foreground writes and background flushing. WSBuffer measured this with one file per writer thread, deliberately keeping file-level lock contention out. NoxDB writes a single file, where the inode's `i_rwsem` is a second candidate, and **this repository has not yet separated the two**. See [`PERFORMANCE.md`](PERFORMANCE.md) §5 — it needs a profiler, not an assertion.
+- **Read-before-write**: a partial-page write that misses the cache triggers a page fault and a slow SSD read to fill the page before it can be updated.
+
+The paper labels these C1–C3; this repository does not reuse those labels, because C1–C4 name its build cycles (see the [Roadmap](#roadmap)).
 
 ## The approach
 
@@ -122,6 +124,10 @@ NoxDB is a **user-space** reimplementation of ideas from the **WSBuffer** paper 
 **Durability is out of scope, deliberately.** There is no WAL, no recovery and no transactions: a crash mid-flush loses whatever had not reached the device. The scope was frozen at the I/O path so the engine could be *measured* rather than left half-built in four directions.
 
 Paper: <https://www.usenix.org/conference/fast26/presentation/zhan>
+
+The two device properties the design reasons with, **read/write asymmetry (α)** and **access concurrency (k)**, come from the **Parametric I/O (PIO) model** (Papon & Athanassoulis, *"A Parametric I/O Model for Modern Storage Devices,"* DaMoN '21). WSBuffer does not cite PIO; linking the two is this repository's framing. NoxDB uses α and k as vocabulary. It does not implement the model, and it has not measured either parameter by the paper's methodology.
+
+Paper: <https://doi.org/10.1145/3465998.3466003>
 
 ## License
 
