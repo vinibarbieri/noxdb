@@ -2,7 +2,7 @@
 
 ## 1. Project Overview & Knowledge Base
 
-This project builds a high-performance, asynchronous user-space I/O storage engine in C for modern Linux systems equipped with NVMe SSDs. The ultimate goal is to serve as a storage backend for **Log-Structured Merge-Tree (LSM-Tree)** databases, directly linking database transactions and compactions to hardware without OS interference.
+This project builds a high-performance user-space I/O storage engine in C for modern Linux systems equipped with NVMe SSDs. The ultimate goal is to serve as a storage backend for **Log-Structured Merge-Tree (LSM-Tree)** databases, directly linking database transactions and compactions to hardware without OS interference.
 
 Development is strictly guided by the following core reference documents:
 

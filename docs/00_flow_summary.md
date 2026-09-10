@@ -9,7 +9,7 @@ Two device properties frame the design. They are the two parameters of the **PIO
 
 The page-cache problem itself comes from **WSBuffer** (Zhan et al., FAST '26, §2.3), not from PIO. Specific pain: a **partial/unaligned write** that misses the cache triggers a page fault and a **slow SSD read to fill the page before updating it** (read-before-write), blocking the user. On top of that, page-management updates contend on the XArray's non-scalable spinlock (`xa_lock`), which limits concurrent page updates under heavy writes.
 
-NoxDB goal: **never make the user wait on SSD I/O**, and **saturate SSD bandwidth** by exploiting its internal parallelism.
+NoxDB goal: **acknowledge small writes without waiting on SSD I/O** (a writer blocks only when the RAM watermark is throttling it), and **skip page-cache management** for large aligned writes. Using the SSD's internal parallelism is not something the engine does yet (see *What is being optimized*).
 
 ## Core concepts
 
@@ -51,6 +51,8 @@ write arrives (offset, size, data)
 ```
 compute window = (offset/256K)*256K
         │
+   RAM watermark: wait if too many pages await flush (no-op otherwise)
+        │
    does the index have a scrap-page for this window?
     │                      │
    YES                    NO
@@ -59,7 +61,7 @@ compute window = (offset/256K)*256K
         │
    copy data into data-zone (relative offset = offset - window)
    header records/merges the segment in the entries
-   IMMEDIATE ACK to user  ◄── user leaves here, does not wait on SSD
+   ACK to user  ◄── returns without waiting on the SSD
 ```
 If a write crosses a 256K boundary, it is **split** across 2 pages (neighboring windows).
 
@@ -71,7 +73,7 @@ A page is enqueued for flush when:
 
 ## OTflush — two-stage flushing (background, pthreads)
 
-Runs on separate threads. The user never blocks.
+Runs on separate threads, so the user does not wait on the SSD. A writer can still block at the RAM watermark when too many scrap pages are waiting to be flushed.
 
 **Stage-1 (READS) — fill holes:**
 - Only needed if the page has holes.
@@ -88,9 +90,9 @@ Runs on separate threads. The user never blocks.
 
 ## What is being optimized
 
-**Latency (for the user):** the write goes to RAM and gets an immediate ACK. Read-before-write was moved off the critical path (it became background Stage-1). The user sees RAM-copy latency, not SSD I/O latency.
+**Latency (for the user):** the write goes to RAM and is acknowledged without waiting on the device, except when the RAM watermark is throttling writers. Read-before-write was moved off the critical path (it became background Stage-1). Normally the user sees RAM-copy latency, not SSD I/O latency; under backpressure a writer waits for the flush to catch up (the slowest write in the 20-minute soak took 9.77 s, `PERFORMANCE.md` §4.3).
 
-**Throughput (for the SSD):** the key is **keeping the SSD queue deep**. Background threads push many concurrent I/Os → the SSD spreads them across its internal channels → aggregate bandwidth near peak. A shallow queue (synchronous 1-at-a-time I/O) = idle channels = wasted bandwidth.
+**Throughput (for the SSD):** today the engine does **not** keep the SSD queue deep. OTflush takes device I/O off the foreground path, but each stage runs on one thread issuing blocking `pread`/`pwrite`/`pwritev`, so the device sees little concurrent I/O: a 300 s soak measured a median `aqu-sz` of 1.58 (`PERFORMANCE.md` §4.6). On the bench SSD that costs little, because its bandwidth stops scaling past QD2 (`docs/03` §2.1). A device with more write concurrency would need several Stage-2 flushers, and that depends on fixing write ordering first (`docs/03` §3).
 
 Parallelism is **across pages (pipeline)**, not within one:
 ```
@@ -98,11 +100,11 @@ page A:  [Stage-1][Stage-2]
 page B:       [Stage-1][Stage-2]   ← B reads while A writes
 page C:            [Stage-1][Stage-2]
 ```
-Within a single page, read→write is sequential (mandatory). Across pages, everything overlaps.
+Within a single page, read→write is sequential (mandatory). Across pages the stages overlap, but with one thread per stage today that means at most one Stage-1 read alongside one Stage-2 write.
 
-Extra gains: `pwritev` cuts the number of syscalls; O_DIRECT bypasses the page cache and eliminates XArray lock contention.
+Extra gains: `pwritev` cuts the number of syscalls when adjacent full pages can be batched; O_DIRECT bypasses the page cache, so the engine's own writes do not pay page-cache management (`docs/03` §3).
 
-**"Opportunistic" (OTflush)** = it exploits the SSD's internal concurrency by running the flush in the background overlapped with the foreground. It is **not** waiting for the SSD to be idle — there is no bandwidth monitoring in the MVP. It fires on the 3 triggers and drains the queue as soon as possible. Adaptive throttling based on SSD latency would be future work.
+**"Opportunistic" (OTflush)** = the flush runs in the background, overlapped with the foreground, instead of on the write path. It does **not** wait for the SSD to be idle. The paper's busy check is implemented (`Bcount`, bytes of I/O in flight, against a 4 MB threshold), but with one thread per stage in-flight I/O peaks at 2.25 MB, so the check cannot fire today (`src/noxdb_config.h`). It fires on the 3 triggers and drains the queue as soon as possible. Adaptive throttling based on SSD latency would be future work.
 
 ## POSIX rules that constrain the design (doc 02)
 

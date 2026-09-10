@@ -1,6 +1,6 @@
 # NoxDB — Performance
 
-Measurement record for the NoxDB user-space asynchronous I/O storage engine.
+Measurement record for the NoxDB user-space storage engine.
 
 **Status: incomplete.** This document currently contains the *device ceiling*
 and the engine numbers measured during cycles C1–C4. The comparative
