@@ -5,22 +5,58 @@ Measurement record for the NoxDB user-space asynchronous I/O storage engine.
 **Status: incomplete.** This document currently contains the *device ceiling*
 and the engine numbers measured during cycles C1–C4. The comparative
 experiments (E1–E3) and their baselines are not in it yet. Sections marked
-🚧 are open. Last measurement run: **2026-08-26**.
+🚧 are open. Last measurement run: **2026-09-09**
+(a baseline attempt, withheld; see §5).
 
 Predictions are recorded here *before* the measurement that settles them, and
 when one is wrong it is kept, marked wrong, and the reason given (§4.6 is the
 current example). A prediction quietly deleted after the fact teaches nothing.
 
 Everything here is measured on the bench box described under
-[Environment](#environment). Nothing in this document is extrapolated, and
+[Environment](#2-environment). Nothing in this document is extrapolated, and
 where a number is known to be inflated it says so next to the number rather
 than in a footnote.
+
+## Summary
+
+**Nothing in this document is a comparison.** No page-cache baseline exists
+yet, and the one attempted on 2026-09-09 was withheld (§5). What is measured
+is the device and the engine's own behaviour.
+
+- **Device ceiling (§3).** Preconditioned WD SN530. 4 KiB random writes
+  saturate at QD2 (~410 MB/s): QD2 → QD64 adds 2.8% while p99 keeps growing.
+  1 MiB sequential holds ~647 MB/s on a 16 GiB working set and ~462 MB/s
+  across the whole drive. A fresh drive's pSLC burst (~1 839 MB/s) is
+  2.84–3.98× what it can sustain.
+- **Fast path (§4.1).** 96.8% of raw `O_DIRECT` bandwidth. The ratio stands;
+  both absolute numbers were measured in pSLC burst and do not.
+- **Sharded index (§4.2).** Throughput scales from 1 to 4 threads on disjoint
+  regions, then plateaus, with zero data races under ThreadSanitizer. The shape
+  stands; the absolute MB/s are burst.
+- **OTflush soak (§4.3).** 20 minutes, 16 threads on shared regions:
+  integrity, bounded RSS and no-stall all pass. Without the eviction watermark
+  the same run dies of OOM at ~6 s. The slowest foreground write took 9.77 s,
+  a known unfairness in how the watermark wakes waiting threads.
+- **Write amplification (§4.4).** At a 256 B mean write size, 99.97% of pages
+  are sealed because their 64 index entries run out (13.47× amplification);
+  at 4 KiB, none are.
+- **Write ordering (§4.5, §4.5.1).** Correct today because Stage-2's queue is
+  FIFO with a single consumer, not because of the guard the code documents.
+  More Stage-2 threads would break it.
+- **Engine queue depth (§4.6).** In a 300 s soak the engine kept the device at
+  a median `aqu-sz` of 1.58. The prediction recorded beforehand was ≥ 4, and it
+  was wrong.
+- **Page faults (§4.7).** Allocating and freeing each 256 KiB data zone costs
+  65 minor faults per cycle; arithmetic puts ~36M of the 39.8M faults measured
+  under load on that cycle. The fix is understood and deliberately not built.
+
+Open items and what cannot be claimed are in §5.
 
 ---
 
 ## 1. Methodology
 
-These five rules gate every benchmark in this repository. Each one has
+These six rules gate every benchmark in this repository. Each one has
 invalidated a published benchmark by serious people at some point, which is why
 none is optional.
 

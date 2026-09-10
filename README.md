@@ -13,6 +13,40 @@
 
 ---
 
+## Start here
+
+**Read first**
+
+1. [`docs/03_wsbuffer_problem.md`](docs/03_wsbuffer_problem.md): the problem (WSBuffer), the device model (PIO), and what each NoxDB mechanism is meant to answer. That mapping is design intent; no baseline exists yet to measure it against.
+2. [`PERFORMANCE.md`](PERFORMANCE.md) §1 and §3: the six methodology rules, and the device ceiling every engine number has to be read against. The summary at the top of that file says what the engine numbers show and what they do not.
+
+Then, for the design and the code: [`docs/01_architecture_noxdb.md`](docs/01_architecture_noxdb.md), [`docs/02_posix_constraints.md`](docs/02_posix_constraints.md), [`include/noxdb.h`](include/noxdb.h), and `nox_write` in [`src/noxdb.c`](src/noxdb.c).
+
+**The queue-depth graph** is [`docs/figures/ceiling-4k-randwrite.svg`](docs/figures/ceiling-4k-randwrite.svg): 4 KiB random-write throughput and p99 against queue depth on the bench SSD (`PERFORMANCE.md` §3.1). It is drawn from the per-repetition data in [`docs/figures/ceiling-4k-randwrite.csv`](docs/figures/ceiling-4k-randwrite.csv) by `./tools/plot_ceiling.py`.
+
+**Run the main gates.** Linux only. Each path must be on an `O_DIRECT`-capable filesystem (XFS or ext4), and the file there is overwritten.
+
+```sh
+# RAM-only unit tests: MPMC queue, Stage-1 hole filling, RAM watermark
+make test-queue test-holes test-watermark
+
+# C2: single-thread scrap-path integrity (write, flush, read back, memcmp)
+make gate && ./bench/scrap_integrity_test /mnt/nvme/c2gate.dat
+
+# C3: concurrent scrap-path integrity on disjoint regions
+make gate-c3 && ./bench/concurrency_test /mnt/nvme/c3gate.dat 8
+
+# C4: background flushing; all data lands and foreground p99.9 stays under the 200 µs stall budget
+make gate-c4 && ./bench/otflush_test /mnt/nvme/c4gate.dat 8
+
+# C4 soak: 20 minutes, 16 threads on shared regions (SOAK_SECONDS=30 for a smoke run)
+make soak-c4
+```
+
+ThreadSanitizer builds exist for the concurrent pieces (`gate-c3-tsan`, `gate-c4-tsan`, `test-queue-tsan`, `test-watermark-tsan`); on the bench box they run under `setarch -R`. The comment above each target in the [`Makefile`](Makefile) has the details.
+
+---
+
 ## The problem
 
 On a modern PCIe NVMe SSD, the Linux **page cache** (the layer meant to make I/O fast) often becomes the ceiling: buffered I/O funnels every write through the cache on the critical path. The WSBuffer paper (Zhan et al., FAST '26, §2.3–2.4) measures this on high-bandwidth SSDs and names three challenges:
