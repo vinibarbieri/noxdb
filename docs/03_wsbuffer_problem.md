@@ -39,7 +39,7 @@ Both parameters vary with the device, the access granularity, the access pattern
 
 ### 2.1 An informal observation on the bench SSD (not a measurement of k)
 
-`PERFORMANCE.md` §3.1 sweeps queue depth for 4 KiB random writes on the bench SSD (WD SN530, XFS). Bandwidth rises 1.61× from QD1 to QD2 and only +2.8% more from QD2 to QD64, while p99 goes from 23.2 µs at QD2 to 220.2 µs at QD4. Bandwidth flattening and latency climbing is the shape PIO uses to locate k. Read informally, this drive's write concurrency for this one shape looks small, around 2.
+`PERFORMANCE.md` §3.1 sweeps queue depth for 4 KiB random writes on the bench SSD (WD SN530, XFS). Bandwidth rises 1.62× from QD1 to QD2 and only +2.8% more from QD2 to QD64, while p99 goes from 23.2 µs at QD2 to 220.2 µs at QD4. Bandwidth flattening and latency climbing is the shape PIO uses to locate k. Read informally, this drive's write concurrency for this one shape looks small, around 2.
 
 This is **not** a measurement of `k_w` by the paper's methodology, and must not be cited as one:
 

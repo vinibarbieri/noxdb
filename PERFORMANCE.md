@@ -204,7 +204,7 @@ set.
 > against 250.3/251.9/253.4/253.2); reps 2–5 give 252.6 MB/s at 1.2% spread.
 > See §5.
 
-**The knee is between QD1 and QD2.** QD1 → QD2 is **1.61×**; QD2 → QD64 is
+**The knee is between QD1 and QD2.** QD1 → QD2 is **1.62×**; QD2 → QD64 is
 **+2.8%**. Everything past QD2 is queueing, not throughput.
 
 **Re-measured with device-side observation (2026-08-26).** §5 asked for this
@@ -229,7 +229,7 @@ time that expectation has been checked rather than assumed, and the reason to
 check was that the same assumption was wrong twice before.
 
 The bandwidth column reproduces the table above (QD1 +1.7%, QD2 +0.2%, knee
-1.60× against 1.61×). Four of the seven points nevertheless carried a
+1.60× against 1.62×). Four of the seven points nevertheless carried a
 `MONOTONIC` warning; see §5, *Residual GC bleeds between points*.
 
 ### 3.2 1 MiB sequential write — the fast path's shape
@@ -263,7 +263,7 @@ roughly QD12.
 
 This resolves what would otherwise look like two different scaling behaviours.
 The 1 MiB curve appears to start already at its plateau — QD1 is 638.5 against
-a 647 ceiling, 1.3% away — while the 4 KiB curve climbs 1.61× from QD1 to QD2.
+a 647 ceiling, 1.3% away — while the 4 KiB curve climbs 1.62× from QD1 to QD2.
 There is no contradiction: **4 KiB requests are below the split threshold and
 are never divided, so their QD1 really is QD1; 1 MiB requests at QD1 are
 already past the knee before the sweep begins.** Corrected for splitting, both
