@@ -77,7 +77,7 @@ Runs on separate threads. The user never blocks.
 - Only needed if the page has holes.
 - Reads from disk (`pread`, 4096-aligned) the real content of the hole ranges → copies it into the hole positions of the buffer.
 - **Why:** a hole means "I don't want to change this part". Without this, the flush would write garbage over valid data already on disk = corruption.
-- A **full page (no holes)** skips Stage-1 → direct flush. This is the ideal case (fewer reads = faster, aligns with the asymmetry).
+- A **full page (no holes)** skips Stage-1 → direct flush. This is the ideal case: no holes means no read-before-write, so the page is written back without a single `pread`.
 
 **Stage-2 (WRITES) — drain:**
 - Writes the 256KB data-zone to the window's `disk_offset` (`pwrite`).
