@@ -1,6 +1,6 @@
 # NoxDB
 
-**A user-space asynchronous I/O storage engine in C that bypasses the Linux page cache to keep modern NVMe SSDs saturated.**
+**A user-space storage engine in C that routes writes around the Linux page cache on NVMe SSDs: large aligned writes go straight to the device with `O_DIRECT`; small writes are buffered in user-space pages and written back in the background with blocking I/O from a single Stage-2 thread.**
 
 ![status](https://img.shields.io/badge/status-early%20WIP-orange)
 ![language](https://img.shields.io/badge/language-C-blue)
@@ -69,7 +69,7 @@ NoxDB **routes** writes instead of caching them. A thin router inspects each wri
                     ┌─────────────┐      ┌──────────────────────────┐
                     │  FAST PATH  │      │        SCRAP PATH        │
                     │  O_DIRECT   │      │  256KB user-space pages  │
-                    │  → SSD      │      │  → async two-stage flush │
+                    │  → SSD      │      │  → background flush      │
                     │ (bypass     │      │    (OTflush) → SSD       │
                     │  the cache) │      │                          │
                     └─────────────┘      └──────────────────────────┘
@@ -78,9 +78,9 @@ NoxDB **routes** writes instead of caching them. A thin router inspects each wri
 | | Fast path | Scrap path |
 |---|---|---|
 | **Trigger** | Large (≥ 1 MB), 4K-aligned writes | Small or unaligned writes |
-| **Mechanism** | `O_DIRECT` `pwrite` straight to the SSD | Copied into a 256 KB in-RAM page, ACK'd immediately |
-| **Flush** | Synchronous, cache-bypassed | Background **OTflush**: stage-1 fills holes via aligned `pread`, stage-2 drains full pages via `pwrite`/`pwritev` |
-| **Goal** | Saturate sequential bandwidth, zero CPU copy | Move read-before-write off the critical path; keep the SSD queue deep |
+| **Mechanism** | `O_DIRECT` `pwrite` straight to the SSD (through an aligned bounce buffer if the caller's buffer is not 4K-aligned) | Copied into a 256 KB in-RAM page and acknowledged without waiting on the device, unless the RAM watermark is throttling writers |
+| **Flush** | Synchronous, cache-bypassed | Background **OTflush**: stage-1 fills holes via aligned `pread`, stage-2 drains full pages via `pwrite`/`pwritev`<br>*today: blocking I/O, one Stage-2 thread* |
+| **Goal** | Skip page-cache management for large aligned writes ([`docs/03`](docs/03_wsbuffer_problem.md) §3) | Take read-before-write off the foreground path, and skip it entirely when a page fills ([`docs/03`](docs/03_wsbuffer_problem.md) §3) |
 
 The two paths were chosen with a **thin LSM key-value store** in mind: an LSM produces exactly two write shapes, tiny WAL appends and large SSTable dumps, which map 1:1 onto them. That is the design argument for the router, and it is **deferred, unbuilt and therefore unmeasured** — see the [Roadmap](#roadmap).
 
@@ -134,13 +134,14 @@ Benchmarks are run on a dedicated bare-metal box against a clean NVMe SSD mounte
 
 ## Roadmap
 
-- [x] **C0** · `O_DIRECT` alignment probe — prove the 4K constraint end-to-end
+- [x] **C0** · `O_DIRECT` alignment probe — the kernel enforces the device's logical block size (512 on the bench box); NoxDB uses 4096 as the portable superset: 4096-aligned I/O is also 512-aligned, and it is valid on 4Kn drives ([`docs/02`](docs/02_posix_constraints.md) §1)
 - [x] **C1** · Fast path — large aligned writes straight to the SSD
 - [x] **C2** · Scrap page + offset→page index
 - [x] **C3** · Concurrency — sharded index, TSan-clean, scaling gate
-- [x] **C4** · OTflush — two-stage async flushing, RAM watermark, 20-min soak
+- [x] **C4** · OTflush — two-stage background flushing, RAM watermark, 20-min soak
 - [ ] **C6** · Read path + `fsync`
 - [ ] **C10** · Evaluation against a page-cache baseline: throughput, p99, CPU
+- [ ] Fix write ordering so Stage-2 can run several flushers, then evaluate asynchronous submission (e.g. `io_uring`) to raise the queue depth the engine puts on the device — see [`docs/03`](docs/03_wsbuffer_problem.md) §3 and [`PERFORMANCE.md`](PERFORMANCE.md) §4.5–4.6
 - [ ] Thin LSM key-value store (WAL + SSTable) on top of the engine — deferred
 
 **Where the honesty is.** C0–C4 are built and gated, and the device's own
