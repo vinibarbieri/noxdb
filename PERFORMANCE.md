@@ -38,8 +38,10 @@ is the device and the engine's own behaviour.
   the same run dies of OOM at ~6 s. The slowest foreground write took 9.77 s,
   a known unfairness in how the watermark wakes waiting threads.
 - **Write amplification (§4.4).** At a 256 B mean write size, 99.97% of pages
-  are sealed because their 64 index entries run out (13.47× amplification);
-  at 4 KiB, none are.
+  are sealed because their 64 index entries run out; at 4 KiB, none are. The
+  13.47× amplification reported with the 256 B figure is provisional: the
+  records do not preserve which run produced it, and re-measuring
+  amplification on a realistic working set is open (§5).
 - **Write ordering (§4.5, §4.5.1).** Correct today because Stage-2's queue is
   FIFO with a single consumer, not because of the guard the code documents.
   More Stage-2 threads would break it.
@@ -416,7 +418,10 @@ Every run whose configuration is recorded used the soak driver's default
 column that working set is tiny, so its peak RSS, the watermark never engaging
 and the 0.004 s `nox_close` describe that working set, not the engine in
 general. The entry-exhaustion share is the column's result; the other three
-figures are not.
+figures are not. Its amplification is left blank on purpose. That run measured
+0.05×: 183.5 GB of ~4 KiB user writes overwrote the same 1 MiB roughly
+175 000 times and coalesced into about 35 800 page writes (9.38 GB on the
+device). That ratio describes the working set, not the engine.
 
 ### 4.5 Write-ordering under multiple Stage-2 threads (2026-08-20)
 
@@ -571,8 +576,10 @@ the strongest lead this run produced. **§4.7 settles it.**
 
 **Write amplification, device-side.** 51 261 771 writes of 1–512 B (mean
 ≈ 256 B) is ≈ 13.2 GB of logical data; the device wrote 490.8 MB/s × 300.3 s
-= 147.4 GB. That is **≈ 11×**, which corroborates the 13.47× that §4.4 derived
-by a completely different route (engine counters, not `iostat`).
+= 147.4 GB. That is **≈ 11×**, in the same range as §4.4's 13.47×, which came
+from engine counters rather than `iostat`. This run's working set was 1 MiB
+(next paragraph), and the run behind the 13.47× is not recorded, so the
+agreement is not a general amplification figure (§4.4, §5).
 
 > **The 490.8 MB/s is not comparable to §3.3.** `c4soak.dat` is 1 MiB — four
 > 256 KiB bases rewritten in a loop for five minutes. A working set that small
@@ -812,6 +819,15 @@ but it is not clean and should move off-device.
   §4.3** (gate build, without `-DNOX_STATS`). Since then the default build has
   changed only in a once-per-engine diagnostic; re-run on current code before
   C10.
+- **Write amplification on a realistic working set.** Every soak run behind
+  §4.4 and §4.6 whose configuration is recorded used `SHARED_BASES=4`, 1 MiB of
+  address space, and at 4 KiB that reduced the measurement to 0.05×. (The
+  `docs/01` §2.1 sweep used the C4 gate driver instead, not the soak.)
+  Re-measure at 256 B and 4 KiB mean write size (`SOAK_MAXLEN=512` and `8192`)
+  with `SOAK_BASES` far above 4. The driver pins each thread to one base, so the
+  bases used are min(threads, `SOAK_BASES`): raising `SOAK_BASES` alone stops at
+  the thread count, and a working set much larger than 16 × 256 KiB needs more
+  threads or a driver change first.
 
 ### Not claimable
 
