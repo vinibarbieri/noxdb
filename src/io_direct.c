@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 /* Loud, unmissable diagnostic when the kernel rejects an unaligned O_DIRECT op.
- * Required by CLAUDE.md §2 / docs/02 §1: catch EINVAL explicitly. */
+ * Required by docs/02 §1: catch EINVAL explicitly. */
 static void report_einval(const char *op, off_t off, size_t len, const void *buf)
 {
     fprintf(stderr,

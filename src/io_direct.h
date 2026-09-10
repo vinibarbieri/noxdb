@@ -19,7 +19,7 @@ int io_direct_open(const char *path);
  * Positioned write via pwrite(). `off` and `len` must be 4K-multiples.
  * If `buf` is not 4K-aligned, a temporary aligned bounce buffer is used, because
  * O_DIRECT requires the *user buffer address* to be aligned too (docs/02 §1).
- * On EINVAL, prints "O_DIRECT alignment violation" to stderr (CLAUDE.md §2).
+ * On EINVAL, prints "O_DIRECT alignment violation" to stderr (docs/02 §1).
  * Returns bytes written, or -1 (errno set).
  */
 ssize_t io_direct_pwrite(int fd, const void *buf, size_t len, off_t off);

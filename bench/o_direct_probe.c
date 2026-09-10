@@ -93,7 +93,7 @@ static void rule(int n, const char *title)
 }
 
 /*
- * Loud EINVAL banner mandated by CLAUDE.md §2 / docs/02. In this probe an EINVAL
+ * Loud EINVAL banner mandated by docs/02 §1. In this probe an EINVAL
  * in the section-3 sweep is EXPECTED (we are hunting the wall), so we do NOT
  * shout there. We only fire this if the *aligned* control write unexpectedly
  * fails -- that would be a genuine "your assumptions are broken" signal.

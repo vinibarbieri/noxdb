@@ -1,5 +1,5 @@
 /*
- * otflush_soak.c - C4 soak gate (board card C4-B6 addendum / C4-G7).
+ * otflush_soak.c - C4 soak gate (C4-B6 addendum / C4-G7).
  *
  * `bench/otflush_test.c` (make gate-c4) proves integrity + no-stall on
  * DISJOINT 256KB bases, matching the plan's Task 6 text and the C3 gate's
@@ -48,7 +48,7 @@
  *     B8 gap, not an inherent concurrent-write race.
  *
  * This is precisely the 17-Aug decision gate's question 1 ("does memcmp
- * integrity pass?") and question 2 ("RAM stable?") from .dev/KANBAN.md - run
+ * integrity pass?") and question 2 ("RAM stable?") - run
  * for real and report the true PASS/FAIL, do not paper over either check.
  *
  * Usage (path required; duration/threads optional, argv wins over env, then

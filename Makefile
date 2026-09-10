@@ -113,7 +113,7 @@ $(GATE_C4): $(OBJ) bench/otflush_test.o
 
 # C4 "before" build: identical tree, one #ifdef apart, with the eager 256KB
 # memset put back in scrap_page_alloc. Measurement artifact only - this is the
-# binary that produces the BEFORE curve of the thread-05 latency CDF. Compiled
+# binary that produces the BEFORE curve of the foreground-latency CDF. Compiled
 # from sources in one shot (not from $(OBJ)) so the -DNOX_EAGER_ZERO objects can
 # never be linked into a real gate binary by a stale .o.
 # Run: NOX_LAT_CSV=before.csv ./bench/otflush_test_zero /mnt/nvme/c4gate.dat 8
@@ -198,12 +198,12 @@ gate-c4-tsan:
 	$(CC) $(CFLAGS) -fsanitize=thread -g -o bench/otflush_test_tsan \
 	    $(SRC) bench/otflush_test.c $(LDFLAGS)
 
-# C4-B6 addendum / C4-G7 (.dev/KANBAN.md): >=20min soak with OVERLAPPING
+# C4-B6 addendum / C4-G7: >=20min soak with OVERLAPPING
 # 256KB bases (many threads share one page_index slot/page-lock/queue slot -
 # the case gate-c3/gate-c4 deliberately partition away from), sampling both
 # memcmp integrity and RSS over time. See bench/otflush_soak.c's header for
 # why a FAIL here on integrity or RSS alone is a documented, expected C5-core
-# gap (board cards C4-B8/C4-B9), not a mystery bug.
+# gap (C4-B8/C4-B9), not a mystery bug.
 # Defaults: 20 min / 16 threads against /mnt/nvme/c4soak.dat. Override for a
 # short smoke run, e.g.:
 #   make soak-c4 SOAK_SECONDS=30 SOAK_THREADS=4

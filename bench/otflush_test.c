@@ -1,7 +1,7 @@
 /*
  * otflush_test.c - C4 acceptance gate: asynchronous two-stage flushing.
  *
- * Gate (KANBAN C4-GATE): thousands of chaotic small writes; foreground never
+ * Gate (C4-GATE): thousands of chaotic small writes; foreground never
  * stalls; all data lands on disk; TSan-clean.
  *
  * Three properties, all checked here:
@@ -20,7 +20,7 @@
  * C4 - same-base contention is C5). The OVERLAPPING-base case this gate
  * deliberately does not cover is exercised instead by `bench/otflush_soak.c`
  * (make soak-c4), which also targets the still-unbuilt C5-core swap protocol
- * (board card C4-B8) and eviction watermark (C4-B9).
+ * (C4-B8) and eviction watermark (C4-B9).
  *
  * Build + run ON THE BENCH BOX against /mnt/nvme:
  *   make gate-c4      && ./bench/otflush_test      /mnt/nvme/c4gate.dat 8

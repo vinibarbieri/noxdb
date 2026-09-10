@@ -17,7 +17,7 @@ Development is strictly guided by the following core reference documents:
 
 Benchmarks run on **bare-metal Ubuntu Server 24.04 LTS** — no hypervisor, no VM, no container. The earlier Proxmox VM / LXC plan is abandoned: a hypervisor adds scheduling jitter and a shared kernel/page cache that corrupt tail-latency (p99/p99.9) and CPU numbers, and an LXC container cannot `mkfs`/`mount` its own device. Bare metal gives true `iomap` direct I/O and clean `perf`/`iostat` measurements.
 
-The benchmark target is a **dedicated, clean NVMe SSD** (WD SN530, TLC, fixed OEM BOM → reproducible) in the board's M.2 slot, formatted XFS and mounted at `/mnt/nvme`, used **only** for benchmarks. The OS lives on a **separate** disk (Kingston NV2 in a USB enclosure) so OS I/O never contends with the device under test. Code is still written locally and pushed via `make deploy` (rsync) — see CLAUDE.md §3.
+The benchmark target is a **dedicated, clean NVMe SSD** (WD SN530, TLC, fixed OEM BOM → reproducible) in the board's M.2 slot, formatted XFS and mounted at `/mnt/nvme`, used **only** for benchmarks. The OS lives on a **separate** disk (Kingston NV2 in a USB enclosure) so OS I/O never contends with the device under test. Code is still written locally and pushed via `make deploy` (rsync; see the `deploy` target in the `Makefile`).
 
 ---
 

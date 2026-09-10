@@ -282,7 +282,7 @@ static void *stage1_loop(void *arg)
     scrap_page_t *p;
 
     /* One 4096-aligned scratch zone for the whole thread lifetime: it is an
-     * O_DIRECT pread target (CLAUDE.md §2), and allocating it per page would
+     * O_DIRECT pread target (docs/02 §1), and allocating it per page would
      * put a 256KB posix_memalign on the hot path. */
     void *scratch = NULL;
     if (posix_memalign(&scratch, NOX_BLOCK_SIZE, NOX_DATAZONE_SIZE) != 0) {

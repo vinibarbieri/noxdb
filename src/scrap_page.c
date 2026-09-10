@@ -233,7 +233,7 @@ static int read_run(uint64_t base, int fd, uint8_t *dst,
     memset(dst + off, 0, len);
 
     /* pread, never read+lseek: Stage-1 shares the fd with every foreground
-     * thread, so a global file offset would be a race (CLAUDE.md §2). */
+     * thread, so a global file offset would be a race (docs/02 §2). */
     ssize_t r = io_direct_pread(fd, dst + off, len, (off_t)(base + off));
     return (r < 0) ? -1 : 0;   /* short read is fine, hard error is not */
 }
@@ -340,7 +340,7 @@ int scrap_page_fill_holes(scrap_page_t *p, int fd)
         return 0;                     /* full page: no Stage-1 read at all */
 
     /* posix_memalign (not malloc) because this buffer is a direct O_DIRECT
-     * pread target (CLAUDE.md §2). */
+     * pread target (docs/02 §1). */
     void *scratch = NULL;
     if (posix_memalign(&scratch, NOX_BLOCK_SIZE, NOX_DATAZONE_SIZE) != 0)
         return -1;

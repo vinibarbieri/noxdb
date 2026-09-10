@@ -92,7 +92,7 @@ static void check(int ok, const char *what)
     if (ok) g_pass++; else g_fail++;
 }
 
-/* Same shape as io_direct.c's report_einval, kept loud per CLAUDE.md §2. */
+/* Same shape as io_direct.c's report_einval, kept loud per docs/02 §1. */
 static void report_einval_iov(off_t off, const struct iovec *iov, int iovcnt)
 {
     fprintf(stderr,

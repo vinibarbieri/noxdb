@@ -2,7 +2,7 @@
  * concurrency_test.c - C3 acceptance gate: concurrent scrap-path integrity +
  * race-freedom + throughput scaling.
  *
- * Gate (KANBAN C3-GATE): N threads write disjoint offsets concurrently;
+ * Gate (C3-GATE): N threads write disjoint offsets concurrently;
  * TSan-clean; throughput scales with threads.
  *
  * Strategy (multi-threaded sibling of scrap_integrity_test):

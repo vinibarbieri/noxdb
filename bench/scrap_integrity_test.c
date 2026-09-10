@@ -1,7 +1,7 @@
 /*
  * scrap_integrity_test.c - C2 acceptance gate: single-thread scrap-path integrity.
  *
- * Gate (KANBAN C2-GATE): write -> flush -> read-back -> memcmp passes.
+ * Gate (C2-GATE): write -> flush -> read-back -> memcmp passes.
  *
  * Strategy:
  *   - Drive small / unaligned / boundary-straddling writes through nox_write so

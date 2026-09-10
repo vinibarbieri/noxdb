@@ -20,9 +20,9 @@ than in a footnote.
 
 ## 1. Methodology
 
-These five rules gate every benchmark in this repository
-(`.dev/KANBAN.md` → C10E-METHOD). Each one has invalidated a published
-benchmark by serious people at some point, which is why none is optional.
+These five rules gate every benchmark in this repository. Each one has
+invalidated a published benchmark by serious people at some point, which is why
+none is optional.
 
 ### M1 · Durability-contract parity 🚧
 
@@ -324,7 +324,7 @@ ThreadSanitizer: zero data races at 4/8/16 threads.
 > concurrency and does not serialize; it does **not** prove `nox_write` is
 > thread-safe in general.
 
-### 4.3 OTflush soak (C4-G7, 2026-08-18)
+### 4.3 OTflush soak (20-minute gate, 2026-08-18)
 
 1 200 s, 16 threads, 4 shared 256 KiB bases, disjoint byte stripes within each
 base — i.e. genuinely overlapping page contention, the case C3 partitioned
@@ -338,9 +338,9 @@ RSS peak 647,060 kB · plateau drift −102,364 kB · ceiling 56.3%
 1. INTEGRITY PASS   2. RSS BOUNDED PASS   3. NO STALL PASS
 ```
 
-Before the C4-B9 eviction watermark, the same run died of OOM at ~6 s having
-reached 10.2 GB. `gate-c4` (8 threads, disjoint bases): PASS, backpressure
-never engaged, p99.9 68 911 ns. TSan clean.
+Before the eviction watermark (`src/watermark.c`), the same run died of OOM at
+~6 s having reached 10.2 GB. `gate-c4` (8 threads, disjoint bases): PASS,
+backpressure never engaged, p99.9 68 911 ns. TSan clean.
 
 **The `max` of 9.77 s is a known unfairness, not an outlier.** It does not
 converge with run length — 2.11 s at 3 s, 4.12 s at 120 s, 9.77 s at 1 200 s —
@@ -525,11 +525,12 @@ by a completely different route (engine counters, not `iostat`).
 > preconditioned. The `aqu-sz` result does not depend on the region size; the
 > throughput figure does, and must not be read as an engine bandwidth number.
 
-**This run does not close C4-G7.** The soak binary says so itself: 300 s is a
-smoke run and the G7 criterion requires ≥ 1200 s. All three criteria passed
-(integrity, RSS bounded, no stall at p99.9), which validates the driver, not
-the gate. The C4-B9 watermark was confirmed armed and binding — throttling at
-4096 live pages, RSS plateauing at 481 MB against a 1144 MB ceiling.
+**This run does not close the 20-minute soak gate.** The soak binary says so
+itself: 300 s is a smoke run and the gate requires ≥ 1200 s. All three criteria
+passed (integrity, RSS bounded, no stall at p99.9), which validates the driver,
+not the gate. The eviction watermark was confirmed armed and binding —
+throttling at 4096 live pages, RSS plateauing at 481 MB against a 1144 MB
+ceiling.
 
 **The tail is still there.** `p99.9 ≈ 102 µs` passes the criterion, but the
 exact maximum was **8.37 s**, with 4 984 foreground writes above 200 µs. The
@@ -752,8 +753,8 @@ but it is not clean and should move off-device.
   §4.6. The prediction recorded here was wrong: predicted ≥ 4, measured 1.58.**
 - **The 8.37 s foreground stall.** §4.6 records the exact maximum; the cause is
   not established. Needs off-CPU analysis, not another soak.
-- **C4-G7 at full length.** §4.6's soak was a 300 s smoke run; the criterion
-  requires ≥ 1200 s.
+- **The 20-minute soak gate at full length.** §4.6's soak was a 300 s smoke
+  run; the criterion requires ≥ 1200 s.
 
 ### Not claimable
 
